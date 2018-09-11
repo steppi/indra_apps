@@ -5,10 +5,11 @@ from indra.statements import Agent, Complex, Evidence
 from indra.literature.pmc_client import id_lookup
 from indra.tools import assemble_corpus as ac
 from functools import lru_cache
+from indra.databases.hgnc_client import get_hgnc_name
 
 
 @lru_cache(1000)
-def get_groundings(name):
+def get_dbrefs(name):
     """Return a dictionary of groundings for a term.
     uses the trips processor.
 
@@ -24,13 +25,15 @@ def get_groundings(name):
     try:
         tp = trips.process_text(name)
         terms = tp.tree.findall('TERM')
-        if not terms:
-            return {}
         term_id = terms[0].attrib['id']
         agent = tp._get_agent_by_id(term_id, None)
-        return agent.db_refs
+        db_refs = agent.db_refs
     except Exception:
-        return {}
+        db_refs = None
+    finally:
+        if not db_refs:
+            db_refs = ac.grounding_map.get(name.upper())
+        return db_refs
 
 
 @lru_cache(1000)
@@ -45,19 +48,15 @@ _hgnc['new_index'] = _hgnc['HGNC ID'].apply(lambda x:
 _hgnc = _hgnc.set_index('new_index')
 
 
-@lru_cache(1000)
-def get_symbol(hgnc_id):
-    return _hgnc.loc[hgnc_id]['Approved Symbol']
-
-
 def get_agent(text):
-    db_refs = get_groundings(text)
+    db_refs = get_dbrefs(text)
+    # check the grounding map if trips couldn't find a grounding
     be = db_refs.get('FPLX')
-    hgnc = db_refs.get('HGNC')
+    hgnc_id = db_refs.get('HGNC')
     if be:
         name = be
-    elif hgnc:
-        name = get_symbol(hgnc)
+    elif hgnc_id:
+        name = get_hgnc_name(hgnc_id)
     else:
         name = re.sub(r"\s+", '_', text)
     return Agent(name=name, db_refs=db_refs)
