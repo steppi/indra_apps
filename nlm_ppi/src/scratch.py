@@ -4,6 +4,8 @@ import numpy as np
 from copy import deepcopy
 from get_complexes import get_dbrefs
 import pickle
+from fuzzywuzzy import fuzz
+import seaborn as sb
 
 true_stmts = ac.load_statements('../work/nlm_ppi_true_statements.pkl')
 false_stmts = ac.load_statements('../work/nlm_ppi_false_statements.pkl')
@@ -81,7 +83,17 @@ for stmt in false_stmts:
     pmid_mapping[pmid]['false'].append(stmt)
 
 
-
+ratio_values = []
+for key, value in pmid_mapping.items():
+    stmts = value['true']
+    sentences = [stmt.evidence[0].text for stmt in stmts]
+    for i in range(len(sentences)):
+        for j in range(i+1, len(sentences)):
+            ratio = fuzz.ratio(sentences[i], sentences[j])
+            ratio_values.append(ratio)
 
 ac.dump_statements(true_stmts, '../work/nlm_ppi_true_statements.pkl')
 ac.dump_statements(false_stmts, '../work/nlm_ppi_false_statements.pkl')
+
+with open('../work/pmid_mapping.pkl', 'wb') as f:
+    pickle.dump(pmid_mapping, f)
