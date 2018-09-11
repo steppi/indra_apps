@@ -73,24 +73,26 @@ false_stmts = map_groundings(false_stmts, mapping)
 pmid_mapping = {}
 for stmt in true_stmts:
     pmid = stmt.evidence[0].pmid
-    if pmid not in pmid_mapping:
-        pmid_mapping[pmid] = {'true': [], 'false': []}
-    pmid_mapping[pmid]['true'].append(stmt)
+    sentence = stmt.evidence[0].text
+    if pmid not in pmid_mapping or sentence not in pmid_mapping[pmid]:
+        pmid_mapping[pmid] = {sentence: {'true': [], 'false': []}}
+    pmid_mapping[pmid][sentence]['true'].append(stmt)
 for stmt in false_stmts:
     pmid = stmt.evidence[0].pmid
-    if pmid not in pmid_mapping:
-        pmid_mapping[pmid] = {'true': [], 'false': []}
-    pmid_mapping[pmid]['false'].append(stmt)
+    sentence = stmt.evidence[0].text
+    if pmid not in pmid_mapping or sentence not in pmid_mapping[pmid]:
+        pmid_mapping[pmid] = {sentence: {'true': [], 'false': []}}
+    pmid_mapping[pmid][sentence]['false'].append(stmt)
 
 
-ratio_values = []
-for key, value in pmid_mapping.items():
-    stmts = value['true']
-    sentences = [stmt.evidence[0].text for stmt in stmts]
-    for i in range(len(sentences)):
-        for j in range(i+1, len(sentences)):
-            ratio = fuzz.ratio(sentences[i], sentences[j])
-            ratio_values.append(ratio)
+# ratio_values = []
+# for key, value in pmid_mapping.items():
+#     stmts = value['true']
+#     sentences = [stmt.evidence[0].text for stmt in stmts]
+#     for i in range(len(sentences)):
+#         for j in range(i+1, len(sentences)):
+#             ratio = fuzz.ratio(sentences[i], sentences[j])
+#             ratio_values.append(ratio)
 
 ac.dump_statements(true_stmts, '../work/nlm_ppi_true_statements.pkl')
 ac.dump_statements(false_stmts, '../work/nlm_ppi_false_statements.pkl')
