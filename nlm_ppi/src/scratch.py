@@ -7,6 +7,52 @@ import pickle
 from fuzzywuzzy import fuzz
 import seaborn as sb
 from collections import defaultdict
+from cachetools import cached
+from cachetools.keys import hashkey
+
+
+class fuzz_set(object):
+    def __init__(self, strings={}, cutoff=0.85):
+        assert all(isinstance(x, str) for x in strings)
+        self.__strings = set(strings)
+        self.__cutoff = cutoff
+
+    def __len__(self):
+        return len(self.__string)
+
+    def __contains__(self, value):
+        for string in self.__strings:
+            if fuzz_ratio(string, value) > self.__cutoff:
+                return True
+        else:
+            return False
+
+    def __repr__(self):
+        return 'fuzz_set({})'.format(str([value for value in self.__strings]))
+
+    def add(self, value):
+        in_set = False
+        for string in self.__strings:
+            if fuzz_ratio(string, value) > self.__cutoff:
+                if value < string:
+                    self.__strings.remove(string)
+                    self.__strings.add(value)
+                in_set = True
+        if not in_set:
+            self.__strings.add(value)
+
+    def remove(self, value):
+        for string in self.__strings:
+            if fuzz_ratio(string, value) > self.__cutoff:
+                self.__strings.remove(string)
+
+    def equiv(self, value):
+        matches = [string for string in self.__strings
+                   if fuzz_ratio(string, value) > self.__cutoff]
+        if matches:
+            return min(matches)
+        else:
+            raise ValueError
 
 
 def get_ungrounded(stmts):
@@ -23,7 +69,7 @@ def add_grounding_map_groundings(stmts):
                 grounding = ac.grounding_map.get(agent.name.upper())
                 if grounding:
                     agent.db_refs = grounding
-        output.append(new_stmt)
+                    output.append(new_stmt)
     return output
 
 
@@ -51,13 +97,17 @@ def map_groundings(stmts, mapping):
     return output
 
 
-wat = []
+@cached(cache={}, key=lambda text1, text2: hashkey(frozenset([text1, text2])))
+def fuzz_ratio(text1, text2):
+    """cached version of fuzzywuzzy.fuzz.ratio.
+    """
+    return fuzz.ratio(text1, text2)/100
 
 
 def duplicate_ppi(ppi1, ppi2, cutoff=0.85):
     # sorry
     try:
-        same_sentence = fuzz.ratio(ppi1[0], ppi2[0]) > cutoff
+        same_sentence = fuzz_ratio(ppi1[0], ppi2[0]) > cutoff
         same_source = (ppi1[1].evidence[0].source_api ==
                        ppi2[1].evidence[0].source_api)
         members1 = {tuple(sorted(agent.db_refs.items()))
@@ -66,7 +116,6 @@ def duplicate_ppi(ppi1, ppi2, cutoff=0.85):
                     for agent in ppi2[1].agent_list()}
         return same_sentence and (members1 == members2) and same_source
     except Exception:
-        wat.append((deepcopy(ppi1), deepcopy(ppi2)))
         return False
 
 
@@ -83,16 +132,11 @@ def remove_duplicate_ppis(ppi_list, cutoff=0.85):
     return newlist
 
 
-# true_stmts = add_grounding_map_groundings(true_stmts)
-# false_stmts = add_grounding_map_groundings(false_stmts)
-
-# true_stmts = map_groundings(true_stmts, mapping)
-# false_stmts = map_groundings(false_stmts, mapping)
-
-# filter ungrounded statements. keep only hgnc or famplex groundings
 def filter_ungrounded(stmts):
     filtered = []
-    for stmt in true_stmts:
+    for stmt in stmts:
+        if None in stmt.agent_list():
+            continue
         new_stmt = deepcopy(stmt)
         for agent in new_stmt.agent_list():
             agent.db_refs = {key: value for key, value in agent.db_refs.items()
@@ -103,23 +147,46 @@ def filter_ungrounded(stmts):
 
 
 # build mapping of pmids to statements
-def get_pmid_mapping(stmt_dict):
-    pmid_mapping = {}
-    for stmt in stmt_dict['true']:
+def get_pmid_mapping(stmts):
+    def get_agent_id(agent):
+        hgnc = agent.db_refs.get('HGNC')
+        fmplx = agent.db_refs.get('FMPLX')
+        if hgnc:
+            return 'HGNC:{}'.format(hgnc)
+        elif fmplx:
+            return 'FMPLX:{}'.format(fmplx)
+        else:
+            return 'UNKNOWN:{}'.format(agent.name)
+
+    frame = []
+    seen = set([])
+    for stmt, truth_value in stmts:
         pmid = stmt.evidence[0].pmid
         sentence = stmt.evidence[0].text
-        if pmid not in pmid_mapping:
-            pmid_mapping[pmid] = {'true': [], 'false': []}
-        pmid_mapping[pmid]['true'].append((sentence, stmt))
-    for stmt in stmt_dict['false']:
-        pmid = stmt.evidence[0].pmid
-        sentence = stmt.evidence[0].text
-        if pmid not in pmid_mapping:
-            pmid_mapping[pmid] = {'true': [], 'false': []}
-        pmid_mapping[pmid]['false'].append((sentence, stmt))
-    return pmid_mapping
+        agent_ids = sorted([get_agent_id(agent)
+                            for agent in stmt.agent_list()])
+        agents_key = ':::'.join(agent_ids)
+        reader = stmt.evidence[0].source_api
+        key = (pmid, sentence, agents_key, reader, truth_value)
+        if key not in seen:
+            frame.append([pmid, agents_key, reader,
+                          truth_value, sentence, stmt])
+            seen.add(key)
+    result = pd.DataFrame(frame, columns=['pmid', 'agents_key', 'reader',
+                                          'type', 'sentence', 'stmt'])
+    result.set_index(['pmid', 'agents_key', 'reader', 'type', 'sentence'],
+                     inplace=True, drop=False)
+    result.sort_index(inplace=True)
+    return result
 
 
+def deduplicate_mapping(mapping_df):
+    groups = mapping_df.groupby(level=['pmid', 'agents_key'])
+    seen = fuzz_set()
+    for _, new_df in groups:
+        for extraction in new_df.itertuples(index=False):
+            
+            
 # remove duplicate ppis in ppi mapping
 def remove_duplicates_in_mapping(pmid_mapping):
     new_pmid_mapping = deepcopy(pmid_mapping)
@@ -129,89 +196,95 @@ def remove_duplicates_in_mapping(pmid_mapping):
     return new_pmid_mapping
 
 
-true_stmts = ac.load_statements('../work/nlm_ppi_true_statements.pkl')
-false_stmts = ac.load_statements('../work/nlm_ppi_false_statements.pkl')
-filtered_true = filter_ungrounded(true_stmts)
-filtered_false = filter_ungrounded(false_stmts)
-stmt_dict = {'true': true_stmts, 'false': false_stmts}
+def get_counts_df(db_pmid_mapping, nlm_pmid_mapping):
+    source_counts = {}
+    for pmid, extractions in db_pmid_mapping.items():
+        source_counts[pmid] = defaultdict(int)
+        for stmt in extractions['true']:
+            source_counts[pmid][stmt[1].evidence[0].source_api] += 1
+    for pmid, extractions in nlm_pmid_mapping.items():
+        if pmid not in source_counts:
+            source_counts[pmid] = defaultdict(int)
+        for stmt in extractions['true']:
+            source_counts[pmid]['nlm_true'] += 1
+        for stmt in extractions['false']:
+            source_counts[pmid]['nlm_false'] += 1
+    frame = []
+    for pmid, counts in source_counts.items():
+        frame.append([pmid, counts['reach'], counts['sparser'],
+                      counts['nlm_true'], counts['nlm_false']])
+    result = pd.DataFrame(frame, columns=['pmid', 'reach', 'sparser',
+                                          'nlm_true', 'nlm_false'])
+    result.index = result.pmid
+    result = result.drop(['pmid'], axis=1)
+    return result
 
-pmid_mapping = get_pmid_mapping(stmt_dict)
-with open('nlm_ppi_stmts_by_pmid.pkl', 'rb') as f:
-    pmid_mapping_filtered = pickle.load(f)
 
-weird = pmid_mapping['27879200']['false']
-weird_filtered = pmid_mapping_filtered['27879200']['false']
+nlm_true_stmts = ac.load_statements('../work/nlm_ppi_true_statements.pkl')
+nlm_false_stmts = ac.load_statements('../work/nlm_ppi_false_statements.pkl')
+nlm_filtered_true = filter_ungrounded(nlm_true_stmts)
+nlm_filtered_false = filter_ungrounded(nlm_false_stmts)
+nlm_stmts = [(stmt, True) for stmt in nlm_true_stmts]
+nlm_stmts += [(stmt, False) for stmt in nlm_false_stmts]
 
-weird = sorted(weird, key=lambda x: sorted(agent.name
-                                           for agent in x[1].agent_list()))
-weird_filtered = sorted(weird_filtered,
-                        key=lambda x: sorted(agent.name
-                                             for agent in x[1].agent_list()))
+with open('../work/db_interaction_stmts_by_pmid.pkl', 'rb') as f:
+    db_pmid_mapping = pickle.load(f)
+db_stmts = []
+for pmid, extraction in db_pmid_mapping.items():
+    for stmt in extraction:
+        db_stmts.append(stmt)
+db_stmts = filter_ungrounded(db_stmts)
+db_stmts = [(stmt, True) for stmt in nlm_true_stmts]
+stmts = nlm_stmts + db_stmts
+pmid_mapping_df = get_pmid_mapping(stmts)
+
+# weird = pmid_mapping['27879200']['false']
+# weird_filtered = pmid_mapping_filtered['27879200']['false']
+
+# weird = sorted(weird, key=lambda x: sorted(agent.name
+#                                            for agent in x[1].agent_list()))
+# weird_filtered = sorted(weird_filtered,
+#                         key=lambda x: sorted(agent.name
+#                                              for agent in x[1].agent_list()))
 
 
-counts1 = [[pmid, len(extractions1['true']), len(extractions1['false']),
+counts1 = [[str(pmid), len(extractions1['true']), len(extractions1['false']),
             len(extractions2['true']), len(extractions2['false'])]
            for (pmid, extractions1), (_, extractions2)
            in zip(pmid_mapping.items(),
                   pmid_mapping_filtered.items())]
 
-counts_df = pd.DataFrame(counts1, columns=['pmid', 'nlm_#true_ppi',
-                                           'nlm_#false_ppi',
-                                           '#nlm_true_no_dupes',
-                                           '#nlm_false_no_dupes'],
-                         dtype='str')
+counts1_df = pd.DataFrame(counts1, columns=['pmid', 'nlm_#true_ppi',
+                                            'nlm_#false_ppi',
+                                            '#nlm_true_no_dupes',
+                                            '#nlm_false_no_dupes'])
+                          
 
-counts_df.to_csv('../work/extraction_counts.tsv', sep='\t', index=False)
+counts1_df.to_csv('../work/extraction_counts.tsv', sep='\t', index=False)
 
 
-with open('../work/db_interaction_stmts_by_pmid.pkl', 'rb') as f:
-    db_pmid_mapping = pickle.load(f)
 
-new_mapping = {}
+new_mapping = nlm_pmid_mapping
 for pmid, extraction in db_pmid_mapping.items():
-    new_mapping[pmid] = {'true': [], 'false': []}
-    for stmt in extraction:
-        if None not in [agent for agent in stmt.agent_list()]:
-            new_stmt = deepcopy(stmt)
-            sentence = new_stmt.evidence[0].text
-            new_mapping[pmid]['true'].append((sentence, new_stmt))
+    if pmid not in new_mapping:
+        new_mapping[pmid] = {'true': [], 'false': []}
+        for stmt in extraction:
+            if None not in stmt.agent_list():
+                new_stmt = deepcopy(stmt)
+                sentence = new_stmt.evidence[0].text
+                new_mapping[pmid]['true'].append((sentence, new_stmt))
 
+db_pmid_mapping_filtered = remove_duplicates_in_mapping(new_mapping)
 
-new_mapping_filtered = remove_duplicates_in_mapping(new_mapping)
-counts2 = [[pmid, len(extractions1['true']), len(extractions1['false']),
+# now we will build a multi-indexed data-frame
+
+counts2 = [[str(pmid), len(extractions1['true']), len(extractions1['false']),
             len(extractions2['true']), len(extractions2['false'])]
            for (pmid, extractions1), (_, extractions2)
            in zip(new_mapping.items(),
-                  new_mapping_filtered.items())]
+                  db_pmid_mapping.items())]
 counts_df2 = pd.DataFrame(counts2, columns=['pmid2', 'db_#true_ppi',
                                             'db_#false_ppi',
                                             'db_#true_no_dupes',
                                             'db_#false_no_dupes'])
 
-counts_df2 = counts_df2.drop(['db_#false_ppi', 'db_#false_no_dupes'], axis=1)
-counts_df2.to_csv("../work/db_extraction_counts.tsv", sep='\t',
-                  index=False)
-all_counts = pd.concat([counts_df, counts_df2], axis=1)
-result = all_counts[['pmid', '#nlm_true_no_dupes',
-                     'db_#true_no_dupes']]
-result.columns = ['pmid', 'nlm_extractions', 'db_extractions']
-result.to_csv('../work/nlm_vs_db_extractions.tsv', sep='\t', index=False)
-
-source_counts = {}
-for pmid, extractions in new_mapping_filtered.items():
-    source_counts[pmid] = defaultdict(int)
-    for stmt in extractions['true']:
-        source_counts[pmid][stmt[1].evidence[0].source_api] += 1
-
-frame = []
-for pmid, counts in source_counts.items():
-    frame.append([pmid, counts['reach'], counts['sparser']])
-
-update_result = pd.DataFrame(frame, columns=['pmid', 'reach', 'sparser'])
-update_result['nlm'] = result['nlm_extractions']
-update_result.to_csv("../work/nlm_vs_reach_vs_sparser_extractions.tsv",
-                     sep="\t", index=False)
-
-update_result.index = update_result.pmid
-update_result = update_result.drop(['pmid'], axis=1)
-update_result['nlm'] = pd.to_numeric(update_result['nlm'])
