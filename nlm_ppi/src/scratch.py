@@ -1,6 +1,7 @@
 from indra.tools import assemble_corpus as ac
 import pandas as pd
 import numpy as np
+import networkx as nx
 from copy import deepcopy
 from get_complexes import get_dbrefs
 import pickle
@@ -9,10 +10,11 @@ import seaborn as sb
 from collections import defaultdict
 from cachetools import cached
 from cachetools.keys import hashkey
+from itertools import combinations
 
 
 class fuzz_set(object):
-    def __init__(self, strings={}, cutoff=0.85):
+    def __init__(self, strings=set([]), cutoff=0.85):
         assert all(isinstance(x, str) for x in strings)
         self.__strings = set(strings)
         self.__cutoff = cutoff
@@ -133,15 +135,15 @@ def remove_duplicate_ppis(ppi_list, cutoff=0.85):
 
 
 def filter_ungrounded(stmts):
+    groundings = set(['HGNC', 'UP', 'IP', 'FPLX', 'PFAM',
+                      'NXPFA', 'CHEBI', 'GO', 'MESH'])
     filtered = []
     for stmt in stmts:
-        if None in stmt.agent_list():
+        if not all(stmt.agent_list()):
             continue
         new_stmt = deepcopy(stmt)
-        for agent in new_stmt.agent_list():
-            agent.db_refs = {key: value for key, value in agent.db_refs.items()
-                             if key == 'HGNC' or key == 'FMPLX'}
-        if {} not in [agent.db_refs for agent in stmt.agent_list()]:
+        if all(groundings.intersection(agent.db_refs.keys())
+               for agent in stmt.agent_list()):
             filtered.append(new_stmt)
     return filtered
 
@@ -149,15 +151,12 @@ def filter_ungrounded(stmts):
 # build mapping of pmids to statements
 def get_pmid_mapping(stmts):
     def get_agent_id(agent):
-        hgnc = agent.db_refs.get('HGNC')
-        fmplx = agent.db_refs.get('FMPLX')
-        if hgnc:
-            return 'HGNC:{}'.format(hgnc)
-        elif fmplx:
-            return 'FMPLX:{}'.format(fmplx)
-        else:
-            return 'UNKNOWN:{}'.format(agent.name)
-
+        grounding_priority = ('HGNC', 'UP', 'IP', 'FPLX', 'PFAM',
+                              'NXPFA', 'CHEBI', 'GO', 'MESH')
+        for grounding in grounding_priority:
+            db_refs = agent.db_refs.get(grounding)
+            if db_refs:
+                return '{}:{}'.format(grounding, db_refs)
     frame = []
     seen = set([])
     for stmt, truth_value in stmts:
@@ -180,13 +179,47 @@ def get_pmid_mapping(stmts):
     return result
 
 
-def deduplicate_mapping(mapping_df):
+def deduplicate_mapping(mapping_df, cutoff=0.85):
+    new_pmid_mapping_df = deepcopy(pmid_mapping_df)
     groups = mapping_df.groupby(level=['pmid', 'agents_key'])
-    seen = fuzz_set()
     for _, new_df in groups:
-        for extraction in new_df.itertuples(index=False):
-            
-            
+        G = nx.Graph()
+        for index, extraction in new_df.iterrows():
+            G.add_node(index, sentence=extraction['sentence'])
+        node_pairs = combinations(G.nodes(data=True), 2)
+        for (index1, data1), (index2, data2) in node_pairs:
+            sentence1, sentence2 = data1['sentence'], data2['sentence']
+            ratio = fuzz_ratio(sentence1, sentence2)
+            if ratio > cutoff:
+                G.add_edge(index1, index2)
+        for component in nx.connected_components(G):
+            least_sentence = min(G.node[x]['sentence'] for x in component)
+            indices = list(component)
+            new_pmid_mapping_df.loc[indices, 'sentence'] = least_sentence
+    duplicates = new_pmid_mapping_df.groupby(level=['pmid', 'agents_key',
+                                                    'reader', 'sentence'])
+    return duplicates.first()
+
+
+def get_statements_table(mapping_df):
+    groups = mapping_df.groupby(level=['pmid', 'agents_key', 'sentence'])
+    frame = []
+    for index1, new_df, in groups:
+        new_row = {'index': index1}
+        new_row['sentence'] = index1[-1]
+        for index2, row in new_df.iterrows():
+            if row.reader == 'nlm_ppi':
+                if row['type']:
+                    new_row['nlm_true'] = row.stmt
+                else:
+                    new_row['nlm_false'] = row.stmt
+            else:
+                new_row[row.reader] = row.stmt
+        frame.append(new_row)
+    output = pd.DataFrame(frame)
+    return output.set_index('index').fillna('None')
+
+
 # remove duplicate ppis in ppi mapping
 def remove_duplicates_in_mapping(pmid_mapping):
     new_pmid_mapping = deepcopy(pmid_mapping)
@@ -224,8 +257,8 @@ nlm_true_stmts = ac.load_statements('../work/nlm_ppi_true_statements.pkl')
 nlm_false_stmts = ac.load_statements('../work/nlm_ppi_false_statements.pkl')
 nlm_filtered_true = filter_ungrounded(nlm_true_stmts)
 nlm_filtered_false = filter_ungrounded(nlm_false_stmts)
-nlm_stmts = [(stmt, True) for stmt in nlm_true_stmts]
-nlm_stmts += [(stmt, False) for stmt in nlm_false_stmts]
+nlm_stmts = [(stmt, True) for stmt in nlm_filtered_true]
+nlm_stmts += [(stmt, False) for stmt in nlm_filtered_false]
 
 with open('../work/db_interaction_stmts_by_pmid.pkl', 'rb') as f:
     db_pmid_mapping = pickle.load(f)
@@ -234,9 +267,18 @@ for pmid, extraction in db_pmid_mapping.items():
     for stmt in extraction:
         db_stmts.append(stmt)
 db_stmts = filter_ungrounded(db_stmts)
-db_stmts = [(stmt, True) for stmt in nlm_true_stmts]
+db_stmts = [(stmt, True) for stmt in db_stmts]
 stmts = nlm_stmts + db_stmts
 pmid_mapping_df = get_pmid_mapping(stmts)
+dedup = deduplicate_mapping(pmid_mapping_df)
+stmts_table = get_statements_table(dedup)
+weird = []
+for stmt in nlm_filtered_true:
+    agents = stmt.agent_list()
+    for agent in agents:
+        if not agent.db_refs.get('HGNC') and not agent.db_refs.get('FPLX'):
+            weird.append((agent, agent.db_refs))
+        
 
 # weird = pmid_mapping['27879200']['false']
 # weird_filtered = pmid_mapping_filtered['27879200']['false']
