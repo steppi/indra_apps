@@ -173,6 +173,52 @@ reach_nlm_disagree = stmts_table[stmts_table.reach.astype('bool')
                                  & stmts_table.nlm_false.astype('bool')]
 nlm_nlm_disagree = stmts_table[stmts_table.nlm_true.astype('bool')
                                & stmts_table.nlm_false.astype('bool')]
-wtf = stmts_table[~stmts_table.nlm_true.astype('bool') &
-                  ~stmts_table.nlm_false.astype('bool')]
+no_nlm = stmts_table[~stmts_table.nlm_true.astype('bool') &
+                     ~stmts_table.nlm_false.astype('bool')].drop(['nlm_true',
+                                                                  'nlm_false'],
+                                                                 axis=1)
 
+with_nlm = stmts_table[stmts_table.nlm_true.astype('bool') |
+                       stmts_table.nlm_false.astype('bool')]
+
+
+match = pd.merge(no_nlm, with_nlm, on=['pmid', 'sentence'])
+sentence_groups = match.groupby(['pmid', 'sentence'])
+frame = []
+for index, new_df in sentence_groups:
+    new_row = {'pmid': index[0], 'sentence': index[1],
+               'reach_x': [], 'sparser_x': [],
+               'reach_y': [], 'sparser_y': [],
+               'nlm_true': [], 'nlm_false': []}
+    for _, row in new_df.iterrows():
+        for reader in ['reach_x', 'sparser_x',
+                       'reach_y', 'sparser_y',
+                       'nlm_true', 'nlm_false']:
+            if row[reader]:
+                new_row[reader].extend(row[reader].agent_list())
+    frame.append(new_row)
+mismatched_agents = pd.DataFrame(frame)
+mismatched_agents = mismatched_agents[['pmid', 'sentence',
+                                       'reach_x', 'reach_y',
+                                       'sparser_x', 'sparser_y',
+                                       'nlm_true', 'nlm_false']]
+mismatched_agents.to_csv('../work/mismatched_agents_table.tsv',
+                         sep='\t', index=False)
+
+
+def get_mismatched(row):
+    db_only = set(row.reach_x) | set(row.sparser_x)
+    nlm_only = set(row.nlm_true) | set(row.nlm_false)
+    return [list(db_only - nlm_only), list(nlm_only - db_only)]
+
+
+mismatched_agents[['db_only',
+                   'nlm_only']] = mismatched_agents.apply(get_mismatched,
+                                                          axis=1,
+                                                          result_type='expand')
+
+db_only = [agent for row in mismatched_agents.db_only.values for agent in row]
+nlm_only = [agent for row in mismatched_agents.nlm_only.values
+            for agent in row]
+db_only_unique = list(set(db_only))
+nlm_only_unique = list(set(nlm_only))
