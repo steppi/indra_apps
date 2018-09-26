@@ -88,7 +88,7 @@ def sentence_match(sen1, sen2, cutoff1=0.8, cutoff2=0.5):
     if ratio > cutoff1:
         return True
     elif ratio > cutoff2:
-        return fuzz.partial_ratio(sen1, sen2)
+        return fuzz.partial_ratio(sen1, sen2)/100 > cutoff1
     else:
         return False
 
