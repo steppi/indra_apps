@@ -38,6 +38,17 @@ def get_dbrefs(name):
 
 @lru_cache(1000)
 def get_pmid(pmcid):
+    """Get the PubMed ID corresponding to a given PubMed Central ID
+
+    Parameters
+    ----------
+    pmcid : string
+    pubmed central id
+
+    Returns
+    ------
+    string: pubmed id
+    """
     return id_lookup(pmcid, idtype='pmcid')['pmid']
 
 
@@ -49,8 +60,18 @@ _hgnc = _hgnc.set_index('new_index')
 
 
 def get_agent(text):
+    """Get a grounded Indra agent from raw text by processing with trips
+
+    Parameters
+    ----------
+    text: string
+    text for an agent
+
+    Returns
+    -------
+    indra.statements.Agent : agent corresponding to string
+    """
     db_refs = get_dbrefs(text)
-    # check the grounding map if trips couldn't find a grounding
     be = db_refs.get('FPLX')
     hgnc_id = db_refs.get('HGNC')
     if be:
@@ -63,6 +84,11 @@ def get_agent(text):
 
 
 def get_complex(row):
+    """ Build Complex from row of pandas dataframe of nlm_ppi extractions.
+    Dataframe contains texts for two agents, a sentence text, and the pmcid
+    for the article that contains the sentence. A one off for use in
+    DataFrame.apply.
+    """
     agent1 = get_agent(row['arg1'])
     agent2 = get_agent(row['arg2'])
     pmid = get_pmid(row['pmc'])
@@ -72,6 +98,10 @@ def get_complex(row):
 
 
 if __name__ == '__main__':
+    """Read in excel file of nlm extractions and build a list of indra statements
+    corresponding to them. Builds Complex statements since there is no generic
+    PPI statement class.
+    """
     df = pd.read_excel("../input/pmcids_interactions1_full_predict1.xlsx",
                        dtype='str')
     df['Statements'] = df.apply(get_complex, axis=1)

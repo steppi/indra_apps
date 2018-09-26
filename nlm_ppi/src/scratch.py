@@ -2,12 +2,15 @@ from indra.tools import assemble_corpus as ac
 import pandas as pd
 import networkx as nx
 from copy import deepcopy
+import regex
 import pickle
 from fuzzywuzzy import fuzz
 from itertools import combinations
 from get_complexes import get_dbrefs
 from cachetools import cached, LRUCache
 from cachetools.keys import hashkey
+from collections import Counter
+
 
 
 def get_ungrounded(stmts):
@@ -48,7 +51,8 @@ def translation_map(stmt):
         if agent.name in mapper:
             new_ground = get_dbrefs(mapper[agent.name])
             agent.db_refs = new_ground
-    return new_stmt  
+            agent.db_refs['text'] = agent.name
+    return new_stmt
 
 
 def is_grounded(stmt):
@@ -122,14 +126,15 @@ def nlm_db_grounding_map(db_stmts, nlm_stmts):
     return mapper
 
 
-def fix_grounding(stmt, mapper):
-    new_stmt = deepcopy(stmt)
+def fix_grounding(row, mapper):
+    new_stmt = deepcopy(row['stmt'])
     for agent in new_stmt.agent_list():
         grounding = frozenset(agent.db_refs.items())
         if grounding in mapper:
             agent.db_refs = mapper[grounding]
-    return frozenset([frozenset(agent.db_refs.items())
-                      for agent in new_stmt.agent_list()])
+    agents = frozenset([frozenset(agent.db_refs.items()) for agent in
+                       new_stmt.agent_list()])
+    return agents
 
 
 def get_mismatched(stmts_table):
@@ -165,14 +170,16 @@ def get_mismatched(stmts_table):
 
 
 pmid_mapping = pd.read_pickle('../work/pmid_stmt_table.pkl')
-pmid_mapping['stmt'] = pmid_mapping['stmt'].apply(lambda x:
-                                                  translation_map(x))
+# pmid_mapping['stmt'] = pmid_mapping['stmt'].apply(lambda x:
+#                                                   translation_map(x))
 
 nlm_stmts = pmid_mapping[pmid_mapping['reader'] == 'nlm_ppi']['stmt'].values
 db_stmts = pmid_mapping[~(pmid_mapping['reader'] == 'nlm_ppi')]['stmt'].values
+
 mapper = nlm_db_grounding_map(db_stmts, nlm_stmts)
-pmid_mapping['agents'] = pmid_mapping['stmt'].apply(lambda x:
-                                                    fix_grounding(x, mapper))
+pmid_mapping['agents'] = pmid_mapping.apply(lambda x:
+                                            fix_grounding(x, mapper),
+                                            axis=1)
 pmid_mapping = pmid_mapping[pmid_mapping['stmt'].apply(is_grounded)]
 stmts_table = get_statements_table(pmid_mapping)
 stmts_table = stmts_table.sort_values(['pmid', 'sentence'])
@@ -207,10 +214,16 @@ with_nlm = stmts_table[stmts_table.nlm_true.astype('bool') |
 with_nlm.replace('', 'None').to_csv('../work/nlm_stmts_table.tsv',
                                     sep='\t', index=False)
 
+reach_and_nlm = stmts_table[stmts_table.reach.astype('bool') &
+                            (stmts_table.nlm_true.astype('bool') |
+                            stmts_table.nlm_false.astype('bool'))]
+
+
+
 reach_nlm_agree = with_nlm[with_nlm.reach.astype('bool')
-                           & with_nlm.nlm_true.astype('bool') |
+                           & (with_nlm.nlm_true.astype('bool') |
                            ~with_nlm.reach.astype('bool') &
-                           with_nlm.nlm_false.astype('bool')]
+                           with_nlm.nlm_false.astype('bool'))]
 reach_nlm_disagree1 = with_nlm[with_nlm.reach.astype('bool')
                                & with_nlm.nlm_false.astype('bool')]
 reach_nlm_disagree1[['sentence', 'reach']].to_csv('../work/disagreement_table.tsv',
@@ -221,3 +234,23 @@ reach_nlm_disagree2 = with_nlm[~with_nlm.reach.astype('bool') &
 x = with_nlm[['reach', 'sparser', 'nlm_true', 'nlm_false']].astype('bool')
 x.groupby('reach')['nlm_true'].value_counts()/x.groupby('reach')['nlm_true'].count()
 with_nlm[with_nlm.astype('bool')['nlm_true']][['sentence', 'nlm_true']].to_csv('../work/nlm_stmts_table.tsv', sep='\t')
+
+
+db_agents = [agent for stmt in stmts_table.reach if stmt
+             for agent in stmt.agent_list()]
+db_agents.extend([agent for stmt in stmts_table.sparser if stmt
+                  for agent in stmt.agent_list()])
+nlm_agents = [agent for stmt in stmts_table.nlm_true if stmt
+              for agent in stmt.agent_list()]
+nlm_agents.extend([agent for stmt in stmts_table.nlm_false if stmt
+                   for agent in stmt.agent_list()])
+db_groundings = [frozenset(agent.db_refs.items()) for agent in db_agents]
+nlm_groundings = [frozenset(agent.db_refs.items()) for agent in nlm_agents]
+in_both = set(db_groundings) & set(nlm_groundings)
+a = Counter(db_groundings)
+b = Counter(nlm_groundings)
+
+
+x = stmts_table[stmts_table['agents'].apply(lambda z: z <= in_both)]
+with_nlm_true = x[x.nlm_true.astype('bool')]
+with_nlm_false = x[x.nlm_false.astype('bool')]
