@@ -30,7 +30,7 @@ def filter_none(stmts):
 
 
 def split_complexes(stmts):
-    """Split complexe statements  with more than two members into multiple
+    """Split complexe statements with more than two members into multiple
     complex statements.
 
     Parameters
@@ -94,6 +94,45 @@ def sentence_match(sen1, sen2, cutoff1=0.8, cutoff2=0.5):
 
 
 def get_pmid_mapping(stmts):
+    """Build a dataframe containing all info from list of statements
+
+    Parameters
+    __________
+
+    stmts : list(tuple)
+    list of tuples of the form (indra.statements.Statement, bool)
+    the bool expresses if the statement has been predicted as true
+    or false_stmts
+
+    Returns
+    _______
+
+    pandas.DataFrame : dataframe with rows corresponding to extractions
+    and columns:
+    pmid, agents, reader, type, sentence, stmt
+    [
+    pmid : string
+    PubMed ID of the article the extraction was taken from
+
+    agents: frozenset of frozensets of tuples
+    identifies the two agents in corresponding statement disregarding order
+
+    reader : string
+    reader that made the extraction
+
+    type : bool
+    describes if statement was predicted as true or false
+
+    sentence : string
+    sentence text where statement was extracted
+
+    stmt : indra.statements.Statement
+    indra statement corresponding to extraction
+    ]
+
+    keeps only one extraction in each sentence that has the same two agents
+    for the same reader
+    """
     frame = []
     seen = set([])
     for stmt, truth_value in stmts:
@@ -115,7 +154,33 @@ def get_pmid_mapping(stmts):
     return result
 
 
-def deduplicate_mapping(mapping_df, cutoff1=0.8, cutoff2=0.5):
+def normalize_sentences(mapping_df, cutoff1=0.8, cutoff2=0.5):
+    """matches sentences from different readers which cannot be identified
+    directly because they have been preprocessed differently
+
+    Makes use of fuzzy string matching
+    Parameters
+    ----------
+
+    mapping_df : pandas.DataFrame
+    dataframe of extraction information generated with get_pmid_mapping
+
+    cutoff1 : float
+    two sentences are considered identical if their levenstein ratio is greater
+    than cutoff1
+
+    cutoff2 : float
+    two sentences are also considered identical if their levenstein ratio is
+    greater than cutoff2 and their partial levenstein ratio is greater than
+    cutoff1.
+
+    Returns
+    -------
+
+    pandas.DataFrame : copy of input dataframe with a new column, sentence ID.
+    sentence ID is identical for sentences that have been matched with fuzzy
+    string matching
+    """
     new_mapping_df = deepcopy(mapping_df)
     new_mapping_df['normed_sentence'] = new_mapping_df['sentence']
     groups = new_mapping_df.groupby(level=['pmid'])
@@ -142,6 +207,13 @@ def deduplicate_mapping(mapping_df, cutoff1=0.8, cutoff2=0.5):
 
 
 if __name__ == '__main__':
+    """ Reads in nlm statements and db statements. Filters out statements with
+    a Nonetype agent (e.g. B is phosphorylated vs A phosphorylates B).
+    Splits complex statements with more than two agents into multiple complex
+    statements with two agents each. Builds dataframe of extraction
+    information. Matches identical sentences processed differently by different
+    readers and dumps output into a pickle file.
+    """
     nlm_true = ac.load_statements('../work/nlm_ppi_true_statements.pkl')
     nlm_false = ac.load_statements('../work/nlm_ppi_false_statements.pkl')
     with open('../work/db_interaction_stmts_by_pmid.pkl', 'rb') as f:
@@ -154,11 +226,15 @@ if __name__ == '__main__':
     nlm_false = filter_none(nlm_false)
     db_stmts = filter_none(db_stmts)
 
+    nlm_true = split_complexes(nlm_true)
+    nlm_false = split_complexes(nlm_false)
+    db_stmts = split_complexes(db_stmts)
+
     nlm_stmts = [(stmt, True) for stmt in nlm_true]
     nlm_stmts += [(stmt, False) for stmt in nlm_false]
     db_stmts = [(stmt, True) for stmt in db_stmts]
     stmts = nlm_stmts + db_stmts
 
     mapping_df = get_pmid_mapping(stmts)
-    dedup = deduplicate_mapping(mapping_df, cutoff1=0.8, cutoff2=0.5)
+    dedup = normalize_sentences(mapping_df, cutoff1=0.8, cutoff2=0.5)
     dedup.to_pickle('../work/extractions_table.pkl')
