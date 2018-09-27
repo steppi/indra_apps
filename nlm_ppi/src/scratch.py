@@ -2,15 +2,10 @@ from indra.tools import assemble_corpus as ac
 import pandas as pd
 import networkx as nx
 from copy import deepcopy
-import regex
-import pickle
-from fuzzywuzzy import fuzz
 from itertools import combinations
 from get_complexes import get_dbrefs
 from cachetools import cached, LRUCache
-from cachetools.keys import hashkey
 from collections import Counter
-
 
 
 def get_ungrounded(stmts):
@@ -63,7 +58,7 @@ def is_grounded(stmt):
 
 
 def get_statements_table(mapping_df):
-    groups = mapping_df.groupby(by=['pmid', 'agents', 'sentence'],
+    groups = mapping_df.groupby(by=['pmid', 'agents', 'sentence_id'],
                                 as_index=False)
     frame = []
     for index1, new_df, in groups:
@@ -80,10 +75,11 @@ def get_statements_table(mapping_df):
             new_row['pmid'] = row['pmid']
             new_row['sentence'] = row['sentence']
             new_row['agents'] = row['agents']
+            new_row['sentence_id'] = row['sentence_id']
         frame.append(new_row)
     output = pd.DataFrame(frame)
-    output = output[['pmid', 'sentence', 'agents', 'sparser',
-                     'reach', 'nlm_true', 'nlm_false']]
+    output = output[['pmid', 'sentence_id', 'sentence', 'agents',
+                     'sparser', 'reach', 'nlm_true', 'nlm_false']]
     return output
 
 
@@ -91,19 +87,13 @@ def equiv_agent(agent1, agent2):
     return not agent1.db_refs.items().isdisjoint(agent2.db_refs.items())
 
 
-def nlm_db_grounding_map(db_stmts, nlm_stmts):
+def nlm_db_grounding_map(stmts):
     mapper = {}
     G = nx.Graph()
-    db_groundings = list(set([frozenset(agent.db_refs.items())
-                             for stmt in db_stmts
-                              for agent in stmt.agent_list()]))
-    nlm_groundings = list(set([frozenset(agent.db_refs.items())
-                              for stmt in nlm_stmts
-                              for agent in stmt.agent_list()]))
-    G.add_nodes_from([(grounding, {'source': 'db'})
-                      for grounding in db_groundings])
-    G.add_nodes_from([(grounding, {'source': 'nlm'})
-                      for grounding in nlm_groundings])
+    all_groundings = list(set([frozenset(agent.db_refs.items())
+                               for stmt in stmts
+                               for agent in stmt.agent_list()]))
+    G.add_nodes_from(all_groundings)
     node_pairs = combinations(G.nodes(data=True), 2)
     for (grounding1, _), (grounding2, _) in node_pairs:
         lower1 = frozenset([(key, value.lower())
@@ -113,14 +103,8 @@ def nlm_db_grounding_map(db_stmts, nlm_stmts):
         if not lower1.isdisjoint(lower2):
             G.add_edge(grounding1, grounding2)
     for component in nx.connected_components(G):
-        db_groundings = [grounding for grounding in component
-                         if G.node[grounding]['source'] == 'db']
-        if db_groundings:
-            canonical = max(db_groundings,
-                            key=lambda x: len(x))
-        else:
-            canonical = max(component,
-                            key=lambda x: len(x))
+        canonical = max(list(component),
+                        key=lambda x: len(x))
         for grounding in component:
             mapper[grounding] = dict(canonical)
     return mapper
@@ -169,29 +153,31 @@ def get_mismatched(stmts_table):
     return output[['pmid', 'sentence', 'db_only', 'nlm_only']]
 
 
-pmid_mapping = pd.read_pickle('../work/pmid_stmt_table.pkl')
-# pmid_mapping['stmt'] = pmid_mapping['stmt'].apply(lambda x:
-#                                                   translation_map(x))
+pmid_blacklist = set(['24141421', '28855251', '25822970'])
+
+
+pmid_mapping = pd.read_pickle('../work/extractions_table.pkl')
+
 
 nlm_stmts = pmid_mapping[pmid_mapping['reader'] == 'nlm_ppi']['stmt'].values
 db_stmts = pmid_mapping[~(pmid_mapping['reader'] == 'nlm_ppi')]['stmt'].values
 
-mapper = nlm_db_grounding_map(db_stmts, nlm_stmts)
+mapper = nlm_db_grounding_map(list(nlm_stmts) + list(db_stmts))
 pmid_mapping['agents'] = pmid_mapping.apply(lambda x:
                                             fix_grounding(x, mapper),
                                             axis=1)
-pmid_mapping = pmid_mapping[pmid_mapping['stmt'].apply(is_grounded)]
+# pmid_mapping = pmid_mapping[pmid_mapping['stmt'].apply(is_grounded)]
 stmts_table = get_statements_table(pmid_mapping)
-stmts_table = stmts_table.sort_values(['pmid', 'sentence'])
+stmts_table = stmts_table.sort_values(['pmid', 'sentence_id'])
 
-mismatched = get_mismatched(stmts_table)
-db_only = [agent for row in mismatched.db_only.values for agent in row]
-nlm_only = [agent for row in mismatched.nlm_only.values
-            for agent in row]
-unique_db_only = list(set(db_only))
-unique_nlm_only = list(set(nlm_only))
-stmts_table.replace('', 'None').to_csv('../work/stmts_table.tsv',
-                                       sep='\t', index=False)
+# mismatched = get_mismatched(stmts_table)
+# db_only = [agent for row in mismatched.db_only.values for agent in row]
+# nlm_only = [agent for row in mismatched.nlm_only.values
+#             for agent in row]
+# unique_db_only = list(set(db_only))
+# unique_nlm_only = list(set(nlm_only))
+# stmts_table.replace('', 'None').to_csv('../work/stmts_table.tsv',
+#                                        sep='\t', index=False)
 
 
 reach_nlm_agree = stmts_table[stmts_table.reach.astype('bool')
@@ -219,38 +205,37 @@ reach_and_nlm = stmts_table[stmts_table.reach.astype('bool') &
                             stmts_table.nlm_false.astype('bool'))]
 
 
-
 reach_nlm_agree = with_nlm[with_nlm.reach.astype('bool')
                            & (with_nlm.nlm_true.astype('bool') |
                            ~with_nlm.reach.astype('bool') &
                            with_nlm.nlm_false.astype('bool'))]
 reach_nlm_disagree1 = with_nlm[with_nlm.reach.astype('bool')
                                & with_nlm.nlm_false.astype('bool')]
-reach_nlm_disagree1[['sentence', 'reach']].to_csv('../work/disagreement_table.tsv',
-                                                  sep='\t', index=False)
+reach_nlm_disagree1[['sentence',
+                     'reach']].to_csv('../work/disagreement_table.tsv',
+                                      sep='\t', index=False)
 reach_nlm_disagree2 = with_nlm[~with_nlm.reach.astype('bool') &
                                with_nlm.nlm_true.astype('bool')]
 
-x = with_nlm[['reach', 'sparser', 'nlm_true', 'nlm_false']].astype('bool')
-x.groupby('reach')['nlm_true'].value_counts()/x.groupby('reach')['nlm_true'].count()
-with_nlm[with_nlm.astype('bool')['nlm_true']][['sentence', 'nlm_true']].to_csv('../work/nlm_stmts_table.tsv', sep='\t')
+db_groundings = [agent for _, row in stmts_table.iterrows()
+                 if row.reach or row.sparser
+                 for agent in row['agents']]
+# db_groundings = frozenset.union(*db_groundings)
 
+nlm_groundings = [agent for _, row in stmts_table.iterrows()
+                  if row.nlm_true or row.nlm_false
+                  for agent in row['agents']]
+# nlm_groundings = frozenset.union(*nlm_groundings)
 
-db_agents = [agent for stmt in stmts_table.reach if stmt
-             for agent in stmt.agent_list()]
-db_agents.extend([agent for stmt in stmts_table.sparser if stmt
-                  for agent in stmt.agent_list()])
-nlm_agents = [agent for stmt in stmts_table.nlm_true if stmt
-              for agent in stmt.agent_list()]
-nlm_agents.extend([agent for stmt in stmts_table.nlm_false if stmt
-                   for agent in stmt.agent_list()])
-db_groundings = [frozenset(agent.db_refs.items()) for agent in db_agents]
-nlm_groundings = [frozenset(agent.db_refs.items()) for agent in nlm_agents]
+common_db_agents = Counter(db_groundings)
+common_nlm_agents = Counter(nlm_groundings)
+
+problematic = set(x[0] for x in common_db_agents.most_common(100))
+problematic = problematic - set(nlm_groundings)
+
 in_both = set(db_groundings) & set(nlm_groundings)
-a = Counter(db_groundings)
-b = Counter(nlm_groundings)
 
-
-x = stmts_table[stmts_table['agents'].apply(lambda z: z <= in_both)]
+x = with_nlm[with_nlm['agents'].apply(lambda z: z <= in_both)]
+x = x[x.pmid.apply(lambda z: z not in pmid_blacklist)]
 with_nlm_true = x[x.nlm_true.astype('bool')]
 with_nlm_false = x[x.nlm_false.astype('bool')]
