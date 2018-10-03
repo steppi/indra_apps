@@ -1,6 +1,7 @@
 from indra.tools import assemble_corpus as ac
 import pandas as pd
 import networkx as nx
+import pickle
 from copy import deepcopy
 from itertools import combinations
 from get_complexes import get_dbrefs
@@ -237,5 +238,17 @@ in_both = set(db_groundings) & set(nlm_groundings)
 
 x = with_nlm[with_nlm['agents'].apply(lambda z: z <= in_both)]
 x = x[x.pmid.apply(lambda z: z not in pmid_blacklist)]
+
+sent_level = x.groupby('sentence_id').any()
+
+unreachable = sent_level[~sent_level.reach.astype('bool') &
+                         sent_level.nlm_true.astype('bool')]
+unreachable = unreachable.index.values
+
+z = pmid_mapping
+z = z[z.reader == 'nlm_ppi']
+z = z[z['type']]
+z = z[z.sentence_id.isin(unreachable)]
+
 with_nlm_true = x[x.nlm_true.astype('bool')]
 with_nlm_false = x[x.nlm_false.astype('bool')]

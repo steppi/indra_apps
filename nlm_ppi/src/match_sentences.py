@@ -1,11 +1,33 @@
 from indra.tools import assemble_corpus as ac
 import pandas as pd
+import numpy as np
 import networkx as nx
 from copy import deepcopy
 import pickle
 from fuzzywuzzy import fuzz
 from itertools import combinations
 from indra.statements import Complex, Evidence
+from cachetools import cached, LRUCache
+from cachetools.keys import hashkey
+
+
+@cached(LRUCache(maxsize=500), key=lambda x:
+        hashkey((x.sentence,
+                 x.reach_sentences)))
+def sentence_id(x,
+                cutoff=0.85):
+    sentence = x.sentence
+    sentence_set = x.reach_sentences
+    fuzz_values = np.fromiter((fuzz.ratio(sentence,
+                                          sentence2)/100
+                               for sentence2 in
+                               sentence_set),
+                              dtype=float)
+    match = np.where(fuzz_values > cutoff)[0]
+    if len(match) == 1:
+        return hash(sentence_set[match[0]])
+    else:
+        return None
 
 
 def filter_none(stmts):
@@ -30,7 +52,7 @@ def filter_none(stmts):
 
 
 def split_complexes(stmts):
-    """Split complexe statements with more than two members into multiple
+    """Split complex statements with more than two members into multiple
     complex statements.
 
     Parameters
@@ -200,35 +222,46 @@ def match_sentences(mapping_df, cutoff=0.8):
     return new_mapping_df
 
 
-if __name__ == '__main__':
-    """ Reads in nlm statements and db statements. Filters out statements with
-    a Nonetype agent (e.g. B is phosphorylated vs A phosphorylates B).
-    Splits complex statements with more than two agents into multiple complex
-    statements with two agents each. Builds dataframe of extraction
-    information. Matches identical sentences processed differently by different
-    readers and dumps output into a pickle file.
-    """
-    nlm_true = ac.load_statements('../work/nlm_ppi_true_statements.pkl')
-    nlm_false = ac.load_statements('../work/nlm_ppi_false_statements.pkl')
-    with open('../work/db_interaction_stmts_by_pmid.pkl', 'rb') as f:
-        db_pmid_mapping = pickle.load(f)
-    db_stmts = []
-    for pmid, extraction in db_pmid_mapping.items():
-        for stmt in extraction:
-            db_stmts.append(stmt)
-    nlm_true = filter_none(nlm_true)
-    nlm_false = filter_none(nlm_false)
-    db_stmts = filter_none(db_stmts)
+""" Reads in nlm statements and db statements. Filters out statements with
+a Nonetype agent (e.g. B is phosphorylated vs A phosphorylates B).
+Splits complex statements with more than two agents into multiple complex
+statements with two agents each. Builds dataframe of extraction
+information. Matches identical sentences processed differently by different
+readers and dumps output into a pickle file.
+"""
 
-    nlm_true = split_complexes(nlm_true)
-    nlm_false = split_complexes(nlm_false)
-    db_stmts = split_complexes(db_stmts)
+pmid_blacklist = set(['24141421', '28855251', '25822970'])
+nlm_true = ac.load_statements('../work/nlm_ppi_true_statements.pkl')
+nlm_false = ac.load_statements('../work/nlm_ppi_false_statements.pkl')
+with open('../work/db_interaction_stmts_by_pmid.pkl', 'rb') as f:
+    db_pmid_mapping = pickle.load(f)
+with open('../work/all_reach_sentences.pkl', 'rb') as f:
+    reach_sentences = pickle.load(f)
 
-    nlm_stmts = [(stmt, True) for stmt in nlm_true]
-    nlm_stmts += [(stmt, False) for stmt in nlm_false]
-    db_stmts = [(stmt, True) for stmt in db_stmts]
-    stmts = nlm_stmts + db_stmts
+db_stmts = []
+for pmid, extraction in db_pmid_mapping.items():
+    for stmt in extraction:
+        db_stmts.append(stmt)
+nlm_true = filter_none(nlm_true)
+nlm_false = filter_none(nlm_false)
+db_stmts = filter_none(db_stmts)
 
-    mapping_df = get_pmid_mapping(stmts)
-    dedup = match_sentences(mapping_df, cutoff=0.8)
-    dedup.to_pickle('../work/extractions_table2.pkl')
+nlm_true = split_complexes(nlm_true)
+nlm_false = split_complexes(nlm_false)
+db_stmts = split_complexes(db_stmts)
+
+nlm_stmts = [(stmt, True) for stmt in nlm_true]
+nlm_stmts += [(stmt, False) for stmt in nlm_false]
+db_stmts = [(stmt, True) for stmt in db_stmts]
+stmts = nlm_stmts + db_stmts
+
+mapping_df = get_pmid_mapping(stmts)
+# keep only reach and nlm statements for now
+mapping_df = mapping_df[~mapping_df.isin(pmid_blacklist)].dropna()
+mapping_df['reach_sentences'] = mapping_df.pmid.apply(lambda x:
+                                                      reach_sentences.get(x))
+mapping_df['sentence_id'] = mapping_df.apply(lambda x:
+                                             sentence_id(x), axis=1)
+mapping_df = mapping_df.dropna()
+# dedup = match_sentences(mapping_df, cutoff=0.85)
+mapping_df.to_pickle('../work/extractions_table3.pkl')
