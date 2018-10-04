@@ -29,10 +29,11 @@ def get_dbrefs(name):
         agent = tp._get_agent_by_id(term_id, None)
         db_refs = agent.db_refs
     except Exception:
-        db_refs = None
+        db_refs = ac.grounding_map.get(name.upper())
     finally:
         if not db_refs:
-            db_refs = ac.grounding_map.get(name.upper())
+            db_refs = {}
+        db_refs['TEXT'] = name
         return db_refs
 
 
@@ -109,5 +110,5 @@ if __name__ == '__main__':
     true_stmts = list(df[df['ppi'] == 'True']['Statements'].values)
     false_stmts = list(df[df['ppi'] == 'False']['Statements'].values)
 
-    ac.dump_statements(true_stmts, '../work/nlm_ppi_true_statements.pkl')
-    ac.dump_statements(false_stmts, '../work/nlm_ppi_false_statements.pkl')
+    ac.dump_statements(true_stmts, '../work/nlm_ppi_true_statements2.pkl')
+    ac.dump_statements(false_stmts, '../work/nlm_ppi_false_statements2.pkl')

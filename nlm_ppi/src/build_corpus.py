@@ -85,4 +85,4 @@ rats1 = fuzz_matrix(nlm_sents[nlm_sents.pmid == '11266465'].sentence.values[0],
 
 rats2 = fuzz_matrix(reach_sents[reach_sents.pmid ==
                                 '11266465'].sentence.values[0],
-                    mapper['11266465']['sentences'].values()
+                    mapper['11266465']['sentences'].values())
