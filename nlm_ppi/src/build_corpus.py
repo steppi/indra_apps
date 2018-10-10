@@ -6,6 +6,8 @@ from indra_db.util import get_primary_db
 from indra_db.client import get_reader_output
 from collections import defaultdict
 from fuzzywuzzy import fuzz
+from itertools import groupby
+import random
 import pickle
 
 
@@ -58,7 +60,6 @@ nlm_sents = pmid_mapper[pmid_mapper.reader == 'nlm_ppi']
 nlm_sents = nlm_sents[~pmid_mapper.pmid.isin(pmid_blacklist)]
 nlm_sents = nlm_sents.groupby('pmid').sentence.unique()
 nlm_sents = nlm_sents.reset_index()
-sent_counts = nlm_sents.sentence.apply(lambda x: len(x))
 
 reach_sents = pmid_mapper[pmid_mapper.reader == 'reach']
 reach_sents = reach_sents[~pmid_mapper.pmid.isin(pmid_blacklist)]
@@ -69,20 +70,13 @@ mapper = {}
 for pmid in pmids:
     mapper[pmid] = reader_info(pmid)
 
-db_sent_counts = {key: len(value['sentences'].keys())
-                  for key, value in mapper.items()}
-sent_counts['nlm'] = sent_counts['pmid'].apply(lambda x: db_sent_counts[x])
-
-sents1 = nlm_sents[nlm_sents.pmid == '11266465'].sentence.values[0]
-sents2 = {pmid: tuple(set(mapper[pmid]['sentences'].values()))
-          for pmid in pmids}
+sents = {}
+for pmid in pmids:
+    sentences = mapper[pmid]['sentences'].items()
+    sentences = sorted(sentences, key=lambda x: x[1])
+    sentences = tuple(random.choice(tuple(group)) for _, group in
+                      groupby(sentences, key=lambda x: x[1]))
+    sents[pmid] = sentences
 
 with open('../work/all_reach_sentences.pkl', 'wb') as f:
-    pickle.dump(sents2, f)
-
-rats1 = fuzz_matrix(nlm_sents[nlm_sents.pmid == '11266465'].sentence.values[0],
-                    mapper['11266465']['sentences'].values())
-
-rats2 = fuzz_matrix(reach_sents[reach_sents.pmid ==
-                                '11266465'].sentence.values[0],
-                    mapper['11266465']['sentences'].values())
+    pickle.dump(sents, f)

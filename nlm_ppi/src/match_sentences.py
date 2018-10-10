@@ -20,12 +20,12 @@ def sentence_id(x,
     sentence_set = x.reach_sentences
     fuzz_values = np.fromiter((fuzz.ratio(sentence,
                                           sentence2)/100
-                               for sentence2 in
+                               for _, sentence2 in
                                sentence_set),
                               dtype=float)
     match = np.where(fuzz_values > cutoff)[0]
     if len(match) == 1:
-        return hash(sentence_set[match[0]])
+        return sentence_set[match[0]][0]
     else:
         return None
 
@@ -264,4 +264,4 @@ mapping_df['sentence_id'] = mapping_df.apply(lambda x:
                                              sentence_id(x), axis=1)
 mapping_df = mapping_df.dropna()
 # dedup = match_sentences(mapping_df, cutoff=0.85)
-mapping_df.to_pickle('../work/extractions_table3.pkl')
+mapping_df.to_pickle('../work/extractions_table4.pkl')

@@ -6,6 +6,8 @@ from get_complexes import get_dbrefs
 from cachetools import cached, LRUCache
 from collections import Counter
 from indra.databases.hgnc_client import get_hgnc_name
+import numpy as np
+from statsmodels.stats.proportion import proportion_confint as confint
 
 
 # many apologies to anyone who has to use this or modify it, including
@@ -120,7 +122,7 @@ def fix_grounding(row, mapper):
 pmid_blacklist = set(['24141421', '28855251', '25822970'])
 
 # read in extracts_df
-extractions_df = pd.read_pickle('../work/extractions_table.pkl')
+extractions_df = pd.read_pickle('../work/extractions_table4.pkl')
 
 # this section is for matching groundings. pull out statements
 # build grounding mapper and apply it dataframe. agents key is a
@@ -212,16 +214,17 @@ problematic = problematic - set(nlm_groundings)
 
 in_both = set(db_groundings) & set(nlm_groundings)
 
-x = with_nlm[with_nlm['agents'].apply(lambda z: z <= in_both)]
-x = x[x.pmid.apply(lambda z: z not in pmid_blacklist)]
+x = with_nlm[with_nlm['agents'].apply(lambda t: t <= in_both)]
+x = x[x.pmid.apply(lambda t: t not in pmid_blacklist)]
 
 sent_level = x.groupby('sentence_id').any()
 
 z = extractions_df
 z = z[(z.agent1 != '') & (z.agent2 != '')]
+z = z[z['agents'].apply(lambda t: t <= in_both)]
 
 # keep only sentences that can be unambiguously
-# matched to a sentence in as tokenized by REACH
+# matched to a sentence as tokenized by REACH
 z = z[z.sentence_id.isin(sent_level.index.values)]
 
 # drop self interactions
@@ -229,12 +232,19 @@ z = z[z.apply(lambda row: len(row.agents) > 1
               and all(row.agents) and row.agent1 != row.agent2,
               axis=1)]
 
+z['foundby'] = z.apply(lambda x:
+                       x.stmt.evidence[0].annotations.get('found_by')
+                       if x.reader == 'reach' else None, axis=1)
+
 unreachable = sent_level[~sent_level.reach.astype('bool') &
                          sent_level.nlm_true.astype('bool')]
 reach_and_nlm = sent_level[sent_level.reach.astype('bool') &
                            sent_level.nlm_true.astype('bool')]
 reach_no_nlm = sent_level[sent_level.reach.astype('bool') &
                           ~sent_level.nlm_true.astype('bool')]
+no_reach_no_nlm = sent_level[~sent_level.reach.astype('bool') &
+                             ~sent_level.nlm_true.astype('bool')]
+
 
 unreachable_df = z[z.sentence_id.isin(unreachable.index)]
 unreachable_df = unreachable_df[unreachable_df.reader == 'nlm_ppi']
@@ -246,34 +256,68 @@ reach_no_nlm_df = reach_no_nlm_df[reach_no_nlm_df.reader ==
 reach_and_nlm_df = z[z.sentence_id.isin(reach_and_nlm.index)]
 reach_nlm_groups = reach_and_nlm_df.groupby(['pmid', 'sentence', 'agents'])
 
-new_rows = []
-for (pmid, sentence, agents), group_df in reach_nlm_groups:
-    new_row = {}
-    print('***', len(group_df))
-    for _, row in group_df.iterrows():
-        if row.reader == 'nlm_ppi':
-            new_row['agent1'] = row['agent1']
-            new_row['agent2'] = row['agent2']
-            new_row['nlm'] = row['stmt']
-        elif row.reader == 'reach':
-            new_row['reach'] = row['stmt']
-    new_row['pmid'] = pmid
-    new_row['sentence'] = sentence
-    new_rows.append(new_row)
-
-reach_and_nlm_df = pd.DataFrame(new_rows)
-reach_and_nlm_df = reach_and_nlm_df[['pmid', 'agent1', 'agent2',
-                                     'sentence', 'reach', 'nlm']]
-
-unreachable_df['reach'] = 'None'
+unreachable_df['reach'] = None
 unreachable_df['nlm'] = unreachable_df['stmt']
 
 reach_no_nlm_df['reach'] = reach_no_nlm_df['stmt']
-reach_no_nlm_df['nlm'] = 'None'
+reach_no_nlm_df['nlm'] = None
 
-final = pd.concat([unreachable_df, reach_no_nlm_df,
-                   reach_and_nlm_df])
+final = pd.concat([unreachable_df, reach_no_nlm_df])
 final = final[['pmid', 'agent1', 'agent2',
                'sentence', 'reach', 'nlm']]
-final.to_csv('../result/extraction_spreadsheet.csv', sep=',',
-             index=False)
+# final.to_csv('../result/extraction_spreadsheet_revised_2.csv', sep=',',
+#              index=False)
+
+# finding rules that nlm is likely to miss
+reach_no_nlm_rules = reach_no_nlm_df['foundby'].value_counts()
+reach_and_nlm_rules = reach_and_nlm_df['foundby'].value_counts()
+
+
+reach_with_nlm = reach_and_nlm_df[reach_and_nlm_df.reader == 'reach']
+reach_no_nlm = reach_no_nlm_df[reach_no_nlm_df.reader == 'reach']
+reach_with_nlm['nlm'] = True
+reach_no_nlm['nlm'] = False
+reach_extractions = pd.concat([reach_with_nlm, reach_no_nlm],
+                              sort=True)
+
+reach_extractions = reach_extractions.drop(['reach', 'reach_sentences'],
+                                           axis=1)
+reach_groups = reach_extractions.groupby(['foundby', 'nlm'])
+reach_counts = pd.Series(reach_groups.count()['agents'])
+reach_counts = reach_counts.to_frame(name='count')
+reach_counts = reach_counts.reset_index()
+
+with_nlm = reach_counts[reach_counts.nlm]
+no_nlm = reach_counts[~reach_counts.nlm]
+
+with_nlm.drop('nlm', inplace=True, axis=1)
+no_nlm.drop('nlm', inplace=True, axis=1)
+with_nlm.columns = ['foundby', 'with_nlm']
+no_nlm.columns = ['foundby', 'no_nlm']
+
+counts = pd.merge(with_nlm, no_nlm, how='outer', on='foundby')
+counts.fillna(0, inplace=True)
+counts[['with_nlm', 'no_nlm']] = counts[['with_nlm',
+                                         'no_nlm']].astype(int, inplace=True)
+counts['total'] = counts.with_nlm + counts.no_nlm
+counts['prob'] = counts.with_nlm / counts.total
+counts['sigma'] = counts.prob*(1-counts.prob)/counts.total
+counts['sigma'] = counts.sigma.apply(np.sqrt)
+counts[['lower', 'upper']] = counts.apply(lambda x:
+                                          pd.Series(confint(x.with_nlm,
+                                                            x.total)),
+                                          axis=1)
+counts.set_index('foundby', inplace=True)
+reach_df = reach_extractions
+reach_df = reach_df[pd.notnull(reach_df.foundby)]
+reach_df['with_nlm'] = reach_df.foundby.apply(lambda x: counts.loc[x].with_nlm)
+reach_df['total'] = reach_df.foundby.apply(lambda x: counts.loc[x].total)
+reach_df['prob'] = reach_df.foundby.apply(lambda x: counts.loc[x].prob)
+reach_df['lower'] = reach_df.foundby.apply(lambda x: counts.loc[x].lower)
+reach_df['upper'] = reach_df.foundby.apply(lambda x: counts.loc[x].upper)
+
+reach_df[['pmid', 'agent1', 'agent2',
+          'sentence', 'nlm', 'with_nlm',
+          'foundby', 'total', 'prob', 'lower',
+          'upper', 'stmt']].to_csv('reach_extractions.csv', sep=',',
+                                   index=False)
