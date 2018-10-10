@@ -117,26 +117,32 @@ def fix_grounding(row, mapper):
     return agents
 
 
-# Exclude pmids with a stupid number of extractions due to the inclusion of
-# tables and other things
-pmid_blacklist = set(['24141421', '28855251', '25822970'])
-
 # read in extracts_df
-extractions_df = pd.read_pickle('../work/extractions_table4.pkl')
+extr_df = pd.read_pickle('../work/extractions_table5.pkl')
+
+
+# in this first step we remove sentences that contain large numbers of genes,
+# such as tables and gene lists. this removes sentences with more than 60
+# extractions by the various readers. this magic number was chosen through
+# inspection
+
+sent_counts = extr_df.sentence_id.value_counts()
+extr_df = extr_df[extr_df.sentence_id.apply(lambda x:
+                                            sent_counts.loc[x] < 60)]
 
 # this section is for matching groundings. pull out statements
 # build grounding mapper and apply it dataframe. agents key is a
 # frozenset of frozenset of canonical agent.db_refs.items()
-nlm_stmts = extractions_df[extractions_df['reader'] ==
-                           'nlm_ppi']['stmt'].values
+nlm_stmts = extr_df[extr_df['reader'] ==
+                    'nlm_ppi']['stmt'].values
 
-db_stmts = extractions_df[~(extractions_df['reader'] ==
-                            'nlm_ppi')]['stmt'].values
+db_stmts = extr_df[~(extr_df['reader'] ==
+                     'nlm_ppi')]['stmt'].values
 
 mapper = nlm_db_grounding_map(list(nlm_stmts) + list(db_stmts))
-extractions_df['agents'] = extractions_df.apply(lambda x:
-                                                fix_grounding(x, mapper),
-                                                axis=1)
+extr_df['agents'] = extr_df.apply(lambda x:
+                                  fix_grounding(x, mapper),
+                                  axis=1)
 
 
 # get the names of agents from agent keys. one off for use in pd.apply
@@ -150,11 +156,11 @@ def __get_agent_names(row):
                             for agent in row.agents))
 
 
-extractions_df[['agent1',
-                'agent2']] = extractions_df.apply(__get_agent_names,
-                                                  axis=1)
+extr_df[['agent1',
+         'agent2']] = extr_df.apply(__get_agent_names,
+                                    axis=1)
 
-stmts_table = get_statements_df(extractions_df)
+stmts_table = get_statements_df(extr_df)
 stmts_table = stmts_table.sort_values(['pmid', 'sentence_id'])
 
 # this section is for identifying agents that are recognized by both
@@ -215,11 +221,10 @@ problematic = problematic - set(nlm_groundings)
 in_both = set(db_groundings) & set(nlm_groundings)
 
 x = with_nlm[with_nlm['agents'].apply(lambda t: t <= in_both)]
-x = x[x.pmid.apply(lambda t: t not in pmid_blacklist)]
 
 sent_level = x.groupby('sentence_id').any()
 
-z = extractions_df
+z = extr_df
 z = z[(z.agent1 != '') & (z.agent2 != '')]
 z = z[z['agents'].apply(lambda t: t <= in_both)]
 
@@ -264,7 +269,7 @@ reach_no_nlm_df['nlm'] = None
 
 final = pd.concat([unreachable_df, reach_no_nlm_df])
 final = final[['pmid', 'agent1', 'agent2',
-               'sentence', 'reach', 'nlm']]
+               'sentence', 'reach', 'nlm', 'foundby']]
 # final.to_csv('../result/extraction_spreadsheet_revised_2.csv', sep=',',
 #              index=False)
 
@@ -305,19 +310,67 @@ counts['sigma'] = counts.prob*(1-counts.prob)/counts.total
 counts['sigma'] = counts.sigma.apply(np.sqrt)
 counts[['lower', 'upper']] = counts.apply(lambda x:
                                           pd.Series(confint(x.with_nlm,
-                                                            x.total)),
+                                                            x.total,
+                                                            alpha=0.0025)),
                                           axis=1)
 counts.set_index('foundby', inplace=True)
-reach_df = reach_extractions
-reach_df = reach_df[pd.notnull(reach_df.foundby)]
-reach_df['with_nlm'] = reach_df.foundby.apply(lambda x: counts.loc[x].with_nlm)
-reach_df['total'] = reach_df.foundby.apply(lambda x: counts.loc[x].total)
-reach_df['prob'] = reach_df.foundby.apply(lambda x: counts.loc[x].prob)
-reach_df['lower'] = reach_df.foundby.apply(lambda x: counts.loc[x].lower)
-reach_df['upper'] = reach_df.foundby.apply(lambda x: counts.loc[x].upper)
 
-reach_df[['pmid', 'agent1', 'agent2',
-          'sentence', 'nlm', 'with_nlm',
-          'foundby', 'total', 'prob', 'lower',
-          'upper', 'stmt']].to_csv('reach_extractions.csv', sep=',',
-                                   index=False)
+final['nlm_sents_with_rule'] = final.foundby.apply(lambda x:
+                                                   counts.loc[x].with_nlm
+                                                   if x
+                                                   else None)
+
+final['total_sents_with_rule'] = final.foundby.apply(lambda x:
+                                                     counts.loc[x].total
+                                                     if x
+                                                     else None)
+
+final['prob'] = final.foundby.apply(lambda x: counts.loc[x].prob if x
+                                    else None)
+
+final['lower'] = final.foundby.apply(lambda x: counts.loc[x].lower if x
+                                     and counts.loc[x].total >= 10
+                                     else None)
+final['upper'] = final.foundby.apply(lambda x: counts.loc[x].upper
+                                     if x and counts.loc[x].total >= 10
+                                     else None)
+
+# final.to_csv('../result/extraction_spreadsheet_with_reach_rules.csv', sep=',',
+#              index=False)
+
+
+w = x[x.reach.astype('bool') &
+      x.nlm_true.astype('bool')]
+w['foundby'] = w.reach.apply(lambda x:
+                             x.evidence[0].annotations.get('found_by'))
+w['nlm_sents_with_rule'] = w.foundby.apply(lambda x:
+                                           counts.loc[x].with_nlm
+                                           if x
+                                           else None)
+
+w['total_sents_with_rule'] = w.foundby.apply(lambda x:
+                                             counts.loc[x].total
+                                             if x
+                                             else None)
+
+w['prob'] = w.foundby.apply(lambda x: counts.loc[x].prob if x else None)
+
+w['lower'] = w.foundby.apply(lambda x: counts.loc[x].lower if x
+                             and counts.loc[x].total >= 10
+                             else None)
+w['upper'] = w.foundby.apply(lambda x: counts.loc[x].upper
+                             if x and counts.loc[x].total >= 10
+                             else None)
+w[['agent1', 'agent2']] = w.apply(__get_agent_names,
+                                  axis=1)
+
+w = w.groupby(['agents', 'sentence'],
+              as_index=False).first()
+
+# w[['pmid', 'agent1', 'agent2', 'sentence',
+#    'reach', 'nlm_true', 'foundby',
+#    'nlm_sents_with_rule',
+#    'total_sents_with_rule',
+#    'prob', 'lower', 'upper']].to_csv('../result/nlm_reach_extractions.csv',
+#                                      sep=',',
+#                                      index=False)

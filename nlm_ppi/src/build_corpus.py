@@ -1,11 +1,9 @@
 import pandas as pd
-import numpy as np
 import re
 import json
 from indra_db.util import get_primary_db
 from indra_db.client import get_reader_output
 from collections import defaultdict
-from fuzzywuzzy import fuzz
 from itertools import groupby
 import random
 import pickle
@@ -15,6 +13,13 @@ db = get_primary_db()
 
 
 def reader_info(pmid):
+    """Given a pmid, get sentences and sentence to entity list mappings
+    from the associated reach JSONS.
+
+    Output is of the form
+    {'sentences': {'sentence_id': tuple(sentence texts)},
+    'entities': {'sentence_id': frozenset(frozenset(tuple(groundings)))...}
+    """
     content = get_reader_output(db, pmid,
                                 ref_type='pmid', reader='reach')
     reach_jsons = [json.loads(value['REACH'][0])
@@ -43,26 +48,16 @@ def reader_info(pmid):
     return {'sentences': sentence_map, 'entities': entity_map}
 
 
-def fuzz_matrix(sent_list1, sent_list2):
-    output = np.zeros((len(sent_list1), len(sent_list2)))
-    for index1, sent1 in enumerate(sent_list1):
-        for index2, sent2 in enumerate(sent_list2):
-            output[index1, index2] = fuzz.ratio(sent1, sent2)/100
-    return output
-
-
 pmid_mapper = pd.read_pickle("../work/extractions_table.pkl")
 pmids = set(pmid_mapper.pmid.unique())
-pmid_blacklist = set(['24141421', '28855251', '25822970'])
-pmids = pmids - pmid_blacklist
+
 
 nlm_sents = pmid_mapper[pmid_mapper.reader == 'nlm_ppi']
-nlm_sents = nlm_sents[~pmid_mapper.pmid.isin(pmid_blacklist)]
 nlm_sents = nlm_sents.groupby('pmid').sentence.unique()
 nlm_sents = nlm_sents.reset_index()
 
+
 reach_sents = pmid_mapper[pmid_mapper.reader == 'reach']
-reach_sents = reach_sents[~pmid_mapper.pmid.isin(pmid_blacklist)]
 reach_sents = reach_sents.groupby('pmid').sentence.unique()
 reach_sents = reach_sents.reset_index()
 
@@ -78,5 +73,15 @@ for pmid in pmids:
                       groupby(sentences, key=lambda x: x[1]))
     sents[pmid] = sentences
 
+ents = {}
+for pmid in pmids:
+    entities = mapper[pmid]['entities'].items()
+    for key, value in entities:
+        ents[key] = value
+
 with open('../work/all_reach_sentences.pkl', 'wb') as f:
     pickle.dump(sents, f)
+
+
+with open('../work/all_reach_groundings.pkl', 'wb') as f:
+    pickle.dump(ents, f)

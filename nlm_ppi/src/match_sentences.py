@@ -83,33 +83,6 @@ def split_complexes(stmts):
     return filtered
 
 
-def sentence_match(sen1, sen2, cutoff=0.8):
-    """Determine if sentences preprocessed by different readers are actually
-    the same.
-
-    Parameters
-    ----------
-    sen1: string
-    sen2: string
-    Two strings containing sentences
-
-    cutoff1: float
-    two sentences match if the levenstein ratio between them is greater than
-    cutoff1
-
-    cutoff2: float
-    if the levenstein ratio is less than cutoff1 but greater than cutoff2, the
-    sentences match if the partial_ratio between sentence1 and sentence2 is
-    greater than cutoff1
-
-    Returns
-    -------
-    bool: True if the sentences match
-    """
-    ratio = fuzz.ratio(sen1, sen2)/100
-    return ratio > cutoff
-
-
 def get_pmid_mapping(stmts):
     """Build a dataframe containing all info from list of statements
 
@@ -171,57 +144,6 @@ def get_pmid_mapping(stmts):
     return result
 
 
-def match_sentences(mapping_df, cutoff=0.8):
-    """matches sentences from different readers which cannot be identified
-    directly because they have been preprocessed differently
-
-    Makes use of fuzzy string matching
-    Parameters
-    ----------
-
-    mapping_df : pandas.DataFrame
-    dataframe of extraction information generated with get_pmid_mapping
-
-    cutoff1 : float
-    two sentences are considered identical if their levenstein ratio is greater
-    than cutoff1
-
-    cutoff2 : float
-    two sentences are also considered identical if their levenstein ratio is
-    greater than cutoff2 and their partial levenstein ratio is greater than
-    cutoff1.
-
-    Returns
-    -------
-
-    pandas.DataFrame : copy of input dataframe with a new column, sentence ID.
-    sentence ID is identical for sentences that have been matched with fuzzy
-    string matching
-    """
-    new_mapping_df = deepcopy(mapping_df)
-    new_mapping_df['normed_sentence'] = new_mapping_df['sentence']
-    groups = new_mapping_df.groupby(level=['pmid'])
-    for _, new_df in groups:
-        G = nx.Graph()
-        for index, extraction in new_df.iterrows():
-            G.add_node(index, sentence=extraction['normed_sentence'])
-        node_pairs = combinations(G.nodes(data=True), 2)
-        for (index1, data1), (index2, data2) in node_pairs:
-            sentence1, sentence2 = (data1['sentence'],
-                                    data2['sentence'])
-            if sentence_match(sentence1, sentence2, cutoff=cutoff):
-                G.add_edge(index1, index2)
-        for component in nx.connected_components(G):
-            least_sentence = min(G.node[x]['sentence']
-                                 for x in component)
-            indices = list(component)
-            new_mapping_df.loc[indices, 'normed_sentence'] = least_sentence
-    new_mapping_df['sentence_id'] = \
-        new_mapping_df['normed_sentence'].apply(lambda x: hash(x))
-    new_mapping_df = new_mapping_df.drop(['normed_sentence'], axis=1)
-    return new_mapping_df
-
-
 """ Reads in nlm statements and db statements. Filters out statements with
 a Nonetype agent (e.g. B is phosphorylated vs A phosphorylates B).
 Splits complex statements with more than two agents into multiple complex
@@ -230,7 +152,6 @@ information. Matches identical sentences processed differently by different
 readers and dumps output into a pickle file.
 """
 
-pmid_blacklist = set(['24141421', '28855251', '25822970'])
 nlm_true = ac.load_statements('../work/nlm_ppi_true_statements.pkl')
 nlm_false = ac.load_statements('../work/nlm_ppi_false_statements.pkl')
 with open('../work/db_interaction_stmts_by_pmid.pkl', 'rb') as f:
@@ -257,11 +178,10 @@ stmts = nlm_stmts + db_stmts
 
 mapping_df = get_pmid_mapping(stmts)
 # keep only reach and nlm statements for now
-mapping_df = mapping_df[~mapping_df.isin(pmid_blacklist)].dropna()
 mapping_df['reach_sentences'] = mapping_df.pmid.apply(lambda x:
                                                       reach_sentences.get(x))
 mapping_df['sentence_id'] = mapping_df.apply(lambda x:
                                              sentence_id(x), axis=1)
 mapping_df = mapping_df.dropna()
 # dedup = match_sentences(mapping_df, cutoff=0.85)
-mapping_df.to_pickle('../work/extractions_table4.pkl')
+mapping_df.to_pickle('../work/extractions_table5.pkl')
