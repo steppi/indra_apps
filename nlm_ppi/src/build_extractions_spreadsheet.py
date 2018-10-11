@@ -7,6 +7,7 @@ from cachetools import cached, LRUCache
 from collections import Counter
 from indra.databases.hgnc_client import get_hgnc_name
 import numpy as np
+import pickle
 from statsmodels.stats.proportion import proportion_confint as confint
 
 
@@ -119,7 +120,9 @@ def fix_grounding(row, mapper):
 
 # read in extracts_df
 extr_df = pd.read_pickle('../work/extractions_table5.pkl')
-
+# read in all reach groundings, keyed on sentence_id
+with open('../work/all_reach_groundings.pkl', 'rb') as f:
+    reach_ents = pickle.load(f)
 
 # in this first step we remove sentences that contain large numbers of genes,
 # such as tables and gene lists. this removes sentences with more than 60
