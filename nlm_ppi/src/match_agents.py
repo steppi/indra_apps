@@ -107,7 +107,7 @@ def get_grounding_map():
         if node1 & node2:
             G.add_edge(node1, node2)
 
-    groundings_list = []
+    groundings_df = []
     for component in nx.connected_components(G):
         canonical = []
         sources = set([])
@@ -115,30 +115,37 @@ def get_grounding_map():
             canonical.append(set(grounding))
             sources.add(G.node[grounding]['source'])
         canonical = set.union(*canonical)
+        grounding_key = hash(frozenset(canonical))
         for grounding in component:
-            mapper[grounding] = canonical
-        groundings_list.append((canonical, sources))
-    return mapper, groundings_list
+            mapper[grounding] = grounding_key
+        groundings_df.append({'key': grounding_key,
+                              'agent': canonical,
+                              'nlm': 'nlm' in sources,
+                              'db': 'db' in sources,
+                              'reach_json': 'reach_json' in sources})
+    groundings_df = pd.DataFrame(groundings_df)
+    groundings_df.set_index('key', inplace=True)
+    return mapper, groundings_df
 
 
 problematic = []
 
 
 def fix_grounding(row, mapper):
-    """Use the above grounding map to fix groundings in the table frame.
-    For use in a pd.apply
+    """Use the above grounding map to fix groundings in the extractions
+    dataframe. For use in a pd.apply
     """
     output = set([])
     for agent in row.stmt.agent_list():
         db_refs = agent.db_refs
         if 'TEXT' in db_refs:
             db_refs['TEXT'] = db_refs['TEXT'].lower()
-        grounding = frozenset(db_refs.items())
-        if grounding in mapper:
-            output.add(frozenset(mapper[grounding]))
+        frozen_refs = frozenset(db_refs.items())
+        if frozen_refs in mapper:
+            output.add(mapper[frozen_refs])
         else:
-            problematic.append(grounding)
-    return hash(frozenset(output))
+            problematic.append(frozen_refs)
+    return frozenset(output)
 
 
 # get the names of agents from agent keys. one off for use in pd.apply
@@ -157,19 +164,13 @@ extr_df[['agent1',
                                     axis=1)
 
 
-mapper, groundings_list = get_grounding_map()
+mapper, groundings_df = get_grounding_map()
 extr_df['agents'] = extr_df.apply(lambda x:
                                   fix_grounding(x, mapper),
                                   axis=1)
 
-considered_agents = set([frozenset(x[0]) for x in groundings_list
-                         if 'reach_json' in x[1] and
-                         'nlm' in x[1]])
-
-extr_df.to_csv('../work/extractions_table_agents_matched.tsv',
-               sep='\t', index=False)
-with open('../work/considered_agents.pkl', 'wb') as f:
-    pickle.dump(considered_agents, f)
+extr_df.to_pickle('../work/extractions_table_agents_matched.pkl')
+groundings_df.to_pickle('../work/groundings_table.pkl')
 # frame = []
 # for grounding in not_in_fplx:
 #     text = grounding[0]

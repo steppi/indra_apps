@@ -1,13 +1,7 @@
 import pandas as pd
-import networkx as nx
 from copy import deepcopy
-from itertools import combinations
-from get_complexes import get_dbrefs
 from cachetools import cached, LRUCache
-from collections import Counter
-from indra.databases.hgnc_client import get_hgnc_name
 import numpy as np
-import pickle
 from statsmodels.stats.proportion import proportion_confint as confint
 
 
@@ -70,99 +64,45 @@ def get_statements_df(extractions_df):
     return output
 
 
-def equiv_agent(agent1, agent2):
-    """We consider two agents to be equivalent if they have at least one
-    shared entry in their db_refs"""
-    return not agent1.db_refs.items().isdisjoint(agent2.db_refs.items())
+# read in extractions dataframe
+extr_df = pd.read_pickle('../work/extractions_table_agents_matched.pkl')
+# read in set of agents that are recognizable by both nlm and reach
+all_agents = pd.read_pickle('../work/groundings_table.pkl')
 
 
-def nlm_db_grounding_map(stmts):
-    """Match groundings for a list of statements. Builds a graph of whose
-    nodes are agents in the stmts. Edges are placed between agents that are
-    equivalent in the sense of having a shared entry in their db_refs. Agents
-    in the connected components of this graph are matched with each other.
-    """
-    mapper = {}
-    G = nx.Graph()
-    all_groundings = list(set([frozenset(agent.db_refs.items())
-                               for stmt in stmts
-                               for agent in stmt.agent_list()]))
-    G.add_nodes_from(all_groundings)
-    node_pairs = combinations(G.nodes(data=True), 2)
-    for (grounding1, _), (grounding2, _) in node_pairs:
-        lower1 = frozenset([(key, value.lower())
-                            for key, value in grounding1])
-        lower2 = frozenset([(key, value.lower())
-                            for key, value in grounding2])
-        if not lower1.isdisjoint(lower2):
-            G.add_edge(grounding1, grounding2)
-    for component in nx.connected_components(G):
-        canonical = max(list(component),
-                        key=lambda x: len(x))
-        for grounding in component:
-            mapper[grounding] = dict(canonical)
-    return mapper
-
-
-def fix_grounding(row, mapper):
-    """Use the above grounding map to fix groundings in the table frame.
-    For use in a pd.apply
-    """
-    new_stmt = deepcopy(row['stmt'])
-    for agent in new_stmt.agent_list():
-        grounding = frozenset(agent.db_refs.items())
-        if grounding in mapper:
-            agent.db_refs = mapper[grounding]
-    agents = frozenset([frozenset(agent.db_refs.items()) for agent in
-                       new_stmt.agent_list()])
-    return agents
-
-
-# read in extracts_df
-extr_df = pd.read_pickle('../work/extractions_table5.pkl')
-# read in all reach groundings, keyed on sentence_id
-with open('../work/all_reach_groundings.pkl', 'rb') as f:
-    reach_ents = pickle.load(f)
-
-# in this first step we remove sentences that contain large numbers of genes,
+# in this next step we remove sentences that contain large numbers of genes,
 # such as tables and gene lists. this removes sentences with more than 60
-# extractions by the various readers. this magic number was chosen through
+# extractions by the various readers. magic number chosen based on manual
 # inspection
-
 sent_counts = extr_df.sentence_id.value_counts()
 extr_df = extr_df[extr_df.sentence_id.apply(lambda x:
                                             sent_counts.loc[x] < 60)]
 
-# this section is for matching groundings. pull out statements
-# build grounding mapper and apply it dataframe. agents key is a
-# frozenset of frozenset of canonical agent.db_refs.items()
-nlm_stmts = extr_df[extr_df['reader'] ==
-                    'nlm_ppi']['stmt'].values
 
-db_stmts = extr_df[~(extr_df['reader'] ==
-                     'nlm_ppi')]['stmt'].values
-
-mapper = nlm_db_grounding_map(list(nlm_stmts) + list(db_stmts))
-extr_df['agents'] = extr_df.apply(lambda x:
-                                  fix_grounding(x, mapper),
-                                  axis=1)
-
-
-# get the names of agents from agent keys. one off for use in pd.apply
-# add agent names to extractions df
-def __get_agent_names(row):
-    return pd.Series(sorted(dict(agent)['TEXT'] if
-                            'TEXT' in dict(agent) else
-                            (get_hgnc_name(dict(agent)['HGNC'])
-                            if 'HGNC' in dict(agent)
-                             else '')
-                            for agent in row.agents))
+def nlm_and_reach(agents_key):
+    """tests if all of the agents from an extraction are recognizable
+    by both reach and nlm.
+    """
+    # agents_key is a frozenset of two agent hashes
+    # unpack into two hashes
+    if len(agents_key) == 2:
+        hash1, hash2 = tuple(agents_key)
+    else:
+        hash1 = tuple(agents_key)[0]
+        hash2 = hash1
+    agent1, agent2 = all_agents.loc[hash1], all_agents.loc[hash2]
+    cond_agent1 = agent1.nlm and agent1.reach_json
+    cond_agent2 = agent2.nlm and agent2.reach_json
+    return cond_agent1 and cond_agent2
 
 
-extr_df[['agent1',
-         'agent2']] = extr_df.apply(__get_agent_names,
-                                    axis=1)
+# only include extractions where all agents can be recognized by
+# both nlm and reach. (ignore sparser for now)
+extr_df = extr_df[extr_df.agents.apply(nlm_and_reach)]
 
+
+# convert extractions to alternative format. see doc_string for
+# get_statements_df
 stmts_table = get_statements_df(extr_df)
 stmts_table = stmts_table.sort_values(['pmid', 'sentence_id'])
 
@@ -170,66 +110,14 @@ stmts_table = stmts_table.sort_values(['pmid', 'sentence_id'])
 # reach and nlm. sorry to anyone who has to work with this. including
 # future albert
 
-reach_nlm_agree = stmts_table[stmts_table.reach.astype('bool')
-                              & stmts_table.nlm_true.astype('bool')]
-reach_nlm_disagree = stmts_table[stmts_table.reach.astype('bool')
-                                 & stmts_table.nlm_false.astype('bool')]
-nlm_nlm_disagree = stmts_table[stmts_table.nlm_true.astype('bool')
-                               & stmts_table.nlm_false.astype('bool')]
 
-no_nlm = stmts_table[~(stmts_table.nlm_true.astype('bool') |
-                       stmts_table.nlm_false.astype('bool'))]
-no_nlm = no_nlm.drop(['nlm_true', 'nlm_false'], axis=1)
-
-with_db = stmts_table[stmts_table.reach.astype('bool') |
-                      stmts_table.sparser.astype('bool')]
-with_db.replace('', 'None').to_csv('../work/db_stmts_table.tsv',
-                                   sep='\t', index=False)
 with_nlm = stmts_table[stmts_table.nlm_true.astype('bool') |
                        stmts_table.nlm_false.astype('bool')]
-with_nlm.replace('', 'None').to_csv('../work/nlm_stmts_table.tsv',
-                                    sep='\t', index=False)
-
-reach_and_nlm = stmts_table[stmts_table.reach.astype('bool') &
-                            (stmts_table.nlm_true.astype('bool') |
-                            stmts_table.nlm_false.astype('bool'))]
-
-
-reach_nlm_agree = with_nlm[with_nlm.reach.astype('bool')
-                           & (with_nlm.nlm_true.astype('bool') |
-                           ~with_nlm.reach.astype('bool') &
-                           with_nlm.nlm_false.astype('bool'))]
-reach_nlm_disagree1 = with_nlm[with_nlm.reach.astype('bool')
-                               & with_nlm.nlm_false.astype('bool')]
-reach_nlm_disagree1[['sentence',
-                     'reach']].to_csv('../work/disagreement_table.tsv',
-                                      sep='\t', index=False)
-reach_nlm_disagree2 = with_nlm[~with_nlm.reach.astype('bool') &
-                               with_nlm.nlm_true.astype('bool')]
-
-db_groundings = [agent for _, row in stmts_table.iterrows()
-                 if row.reach or row.sparser
-                 for agent in row['agents']]
-
-nlm_groundings = [agent for _, row in stmts_table.iterrows()
-                  if row.nlm_true or row.nlm_false
-                  for agent in row['agents']]
-
-common_db_agents = Counter(db_groundings)
-common_nlm_agents = Counter(nlm_groundings)
-
-problematic = set(x[0] for x in common_db_agents.most_common(100))
-problematic = problematic - set(nlm_groundings)
-
-in_both = set(db_groundings) & set(nlm_groundings)
-
-x = with_nlm[with_nlm['agents'].apply(lambda t: t <= in_both)]
-
-sent_level = x.groupby('sentence_id').any()
+sent_level = with_nlm.groupby('sentence_id').any()
 
 z = extr_df
 z = z[(z.agent1 != '') & (z.agent2 != '')]
-z = z[z['agents'].apply(lambda t: t <= in_both)]
+
 
 # keep only sentences that can be unambiguously
 # matched to a sentence as tokenized by REACH
