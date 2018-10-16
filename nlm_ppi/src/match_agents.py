@@ -169,6 +169,12 @@ extr_df['agents'] = extr_df.apply(lambda x:
                                   fix_grounding(x, mapper),
                                   axis=1)
 
+# Since agents have been deduplicated (somewhat), some sentence, agent, agent
+# triples that were previously distinct may become the same. Remove these
+# duplicates
+extr_df = extr_df.groupby(['sentence_id', 'agents',
+                           'reader', 'type'], as_index=False).first()
+
 extr_df.to_pickle('../work/extractions_table_agents_matched.pkl')
 groundings_df.to_pickle('../work/groundings_table.pkl')
 # frame = []

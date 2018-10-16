@@ -9,6 +9,7 @@ from itertools import combinations
 from indra.statements import Complex, Evidence
 from cachetools import cached, LRUCache
 from cachetools.keys import hashkey
+from nltk.tokenize import sent_tokenize
 
 
 @cached(LRUCache(maxsize=500), key=lambda x:
@@ -30,6 +31,38 @@ def sentence_id(x,
         return None
 
 
+@cached(LRUCache(maxsize=500), key=lambda x:
+        hashkey((x.sentence,
+                 x.reach_sentences)))
+def split_differently(x, cutoff=0.85):
+    def max_ratio(tokens1, tokens2):
+        fuzz_values = np.fromiter((fuzz.ratio(token1,
+                                              token2)/100
+                                   for token1 in tokens1
+                                   for token2 in tokens2),
+                                  dtype=float)
+        return np.max(fuzz_values)
+    sentence = x.sentence
+    sent1 = sent_tokenize(sentence)
+    reach_sentences = x.reach_sentences
+    reach_tokenized = [sent_tokenize(sent)
+                       for _, sent in reach_sentences]
+    fuzz_values = np.fromiter((max_ratio(sent1,
+                                         sent2)
+                               for sent2 in reach_tokenized),
+                              dtype=float)
+    match = np.where(fuzz_values > cutoff)[0]
+    if len(match) == 1:
+        r = fuzz.ratio(sentence,
+                       reach_sentences[match[0]][1])/100
+        if r < 0.7 and r > 0.5:
+            return (sentence, reach_sentences[match[0]][1])
+        else:
+            return None
+    else:
+        return None
+    
+    
 def filter_none(stmts):
     """Filter statements including an empty agent.
 
@@ -183,5 +216,8 @@ mapping_df['reach_sentences'] = mapping_df.pmid.apply(lambda x:
 mapping_df['sentence_id'] = mapping_df.apply(lambda x:
                                              sentence_id(x), axis=1)
 mapping_df = mapping_df.dropna()
-# dedup = match_sentences(mapping_df, cutoff=0.85)
+# find sentence_ids that contain nlm statements
+nlm_ids = mapping_df['sentence_id'][mapping_df.reader == 'nlm_ppi'].unique()
+mapping_df = mapping_df[mapping_df['sentence_id'].isin(nlm_ids)]
+
 mapping_df.to_pickle('../work/extractions_table5.pkl')

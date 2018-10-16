@@ -3,10 +3,14 @@ from copy import deepcopy
 from cachetools import cached, LRUCache
 import numpy as np
 from statsmodels.stats.proportion import proportion_confint as confint
+from get_complexes import get_dbrefs
+from indra.statements import Complex, Modification
+from indra.statements import RegulateAmount, RegulateActivity
 
 
 # many apologies to anyone who has to use this or modify it, including
 # future albert.
+
 
 @cached(LRUCache(maxsize=500), key=lambda x:
         tuple(sorted([agent.name for agent
@@ -115,6 +119,100 @@ with_nlm = stmts_table[stmts_table.nlm_true.astype('bool') |
                        stmts_table.nlm_false.astype('bool')]
 sent_level = with_nlm.groupby('sentence_id').any()
 
+complex_only = deepcopy(with_nlm)
+complex_only[['reach',
+              'sparser',
+              'nlm_true',
+              'nlm_false']] = \
+                  complex_only[['reach',
+                                'sparser',
+                                'nlm_true',
+                                'nlm_false']].applymap(lambda x: x if
+                                                       isinstance(x,
+                                                                  Complex)
+                                                       else None)
+complex_sent_level = complex_only.groupby('sentence_id').any()
+
+no_complex = deepcopy(with_nlm)
+no_complex[['reach',
+            'sparser']] = \
+                no_complex[['reach',
+                            'sparser']].applymap(lambda x: x if
+                                                 not isinstance(x,
+                                                                Complex)
+                                                 else None)
+
+no_complex_sent_level = no_complex.groupby('sentence_id').any()
+
+modification = deepcopy(with_nlm)
+modification[['reach',
+              'sparser']] = \
+                  modification[['reach',
+                                'sparser']].applymap(lambda x: x if
+                                                     isinstance(x,
+                                                                Modification)
+                                                     else None)
+
+modification_sent_level = modification.groupby('sentence_id').any()
+
+
+regulate = deepcopy(with_nlm)
+regulate[['reach',
+          'sparser']] = \
+              regulate[['reach',
+                        'sparser']].applymap(lambda x: x if
+                                             isinstance(x,
+                                                        RegulateAmount)
+                                             or
+                                             isinstance(x,
+                                                        RegulateActivity)
+                                             else None)
+
+regulate_sent_level = regulate.groupby('sentence_id').any()
+# columns giving all agents identified by reach and agents identified
+# by nlm added to sent_level
+z = extr_df[['sentence_id', 'agents', 'reader']]
+
+groups = z.groupby('reader')
+reach_group = groups.get_group('reach')
+nlm_group = groups.get_group('nlm_ppi')
+
+reach_agents = reach_group.groupby('sentence_id')
+
+
+reach_agents = reach_agents['agents'].agg(lambda x:
+                                          set.union(*[set(y)
+                                                      for y
+                                                      in x]))
+nlm_agents = nlm_group.groupby('sentence_id')
+
+nlm_agents = nlm_agents['agents'].agg(lambda x:
+                                      set.union(*[set(y)
+                                                  for y
+                                                  in x]))
+agents = pd.DataFrame({'reach_agents': reach_agents,
+                       'nlm_agents': nlm_agents})
+
+reach_isnull = agents.reach_agents.isnull()
+nlm_isnull = agents.nlm_agents.isnull()
+
+agents.loc[reach_isnull, 'reach_agents'] = [set([])] * reach_isnull.sum()
+agents.loc[nlm_isnull, 'nlm_agents'] = [set([])] * nlm_isnull.sum()
+
+agents['in_common'] = agents.apply(lambda row: row.reach_agents &
+                                   row.nlm_agents,
+                                   axis=1)
+
+com_agent_extr_df = extr_df[extr_df.apply(lambda row: row.agents <=
+                                          agents.in_common.loc[row.sentence_id]
+                                          if row.sentence_id in agents.index
+                                          else False,
+                                          axis=1)]
+
+x = get_statements_df(com_agent_extr_df)
+x_with_nlm = x[x.nlm_true.astype('bool') | x.nlm_false.astype('bool')]
+
+print(x[['reach', 'nlm_true', 'nlm_false']].astype('bool').corr())
 z = extr_df
 z = z[(z.agent1 != '') & (z.agent2 != '')]
 
@@ -230,38 +328,36 @@ final['upper'] = final.foundby.apply(lambda x: counts.loc[x].upper
 #              index=False)
 
 
-w = x[x.reach.astype('bool') &
-      x.nlm_true.astype('bool')]
-w['foundby'] = w.reach.apply(lambda x:
-                             x.evidence[0].annotations.get('found_by'))
-w['nlm_sents_with_rule'] = w.foundby.apply(lambda x:
-                                           counts.loc[x].with_nlm
-                                           if x
-                                           else None)
+# w = x[x.reach.astype('bool') &
+#       x.nlm_true.astype('bool')]
+# w['foundby'] = w.reach.apply(lambda x:
+#                              x.evidence[0].annotations.get('found_by'))
+# w['nlm_sents_with_rule'] = w.foundby.apply(lambda x:
+#                                            counts.loc[x].with_nlm
+#                                            if x
+#                                            else None)
 
-w['total_sents_with_rule'] = w.foundby.apply(lambda x:
-                                             counts.loc[x].total
-                                             if x
-                                             else None)
+# w['total_sents_with_rule'] = w.foundby.apply(lambda x:
+#                                              counts.loc[x].total
+#                                              if x
+#                                              else None)
 
-w['prob'] = w.foundby.apply(lambda x: counts.loc[x].prob if x else None)
+# w['prob'] = w.foundby.apply(lambda x: counts.loc[x].prob if x else None)
 
-w['lower'] = w.foundby.apply(lambda x: counts.loc[x].lower if x
-                             and counts.loc[x].total >= 10
-                             else None)
-w['upper'] = w.foundby.apply(lambda x: counts.loc[x].upper
-                             if x and counts.loc[x].total >= 10
-                             else None)
-w[['agent1', 'agent2']] = w.apply(__get_agent_names,
-                                  axis=1)
+# w['lower'] = w.foundby.apply(lambda x: counts.loc[x].lower if x
+#                              and counts.loc[x].total >= 10
+#                              else None)
+# w['upper'] = w.foundby.apply(lambda x: counts.loc[x].upper
+#                              if x and counts.loc[x].total >= 10
+#                              else None)
 
-w = w.groupby(['agents', 'sentence'],
-              as_index=False).first()
+# w = w.groupby(['agents', 'sentence'],
+#               as_index=False).first()
 
-# w[['pmid', 'agent1', 'agent2', 'sentence',
-#    'reach', 'nlm_true', 'foundby',
-#    'nlm_sents_with_rule',
-#    'total_sents_with_rule',
-#    'prob', 'lower', 'upper']].to_csv('../result/nlm_reach_extractions.csv',
-#                                      sep=',',
-#                                      index=False)
+# # w[['pmid', 'agent1', 'agent2', 'sentence',
+# #    'reach', 'nlm_true', 'foundby',
+# #    'nlm_sents_with_rule',
+# #    'total_sents_with_rule',
+# #    'prob', 'lower', 'upper']].to_csv('../result/nlm_reach_extractions.csv',
+# #                                      sep=',',
+# #                                      index=False)
