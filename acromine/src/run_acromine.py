@@ -1,4 +1,5 @@
 import pandas as pd
+import argparse
 from indra.tools import assemble_corpus as ac
 from indra.databases.acromine_client import get_disambiguations
 from random import sample
@@ -37,7 +38,6 @@ def _get_agent_names(stmt, text):
     names: list[str] list of agent names for agents in stmt with given text
     """
     if stmt:
-        print(stmt)
         names = [agent.name for agent in stmt.agent_list()
                  if agent and agent.db_refs.get('TEXT') == text]
     else:
@@ -96,7 +96,27 @@ def get_stmts_df(stmts, shortform):
 
 
 if __name__ == '__main__':
-    stmts = ac.load_statements('../work/ER_statements.pkl')
-    test_stmts = sample(stmts, 10)
-    test_df = get_stmts_df(test_stmts, 'ER')
-    test_df.to_pickle('../work/sample_ER_statements_df_old.pkl')
+    parser = argparse.ArgumentParser(description='run acromine on the texts'
+                                     'from a list of statements using the REST'
+                                     ' API. Output spreadsheet of results')
+    parser.add_argument('shortform')
+    parser.add_argument('infile')
+    parser.add_argument('outfile')
+    parser.add_argument('-c', '--count', help='number of statements to run'
+                        ' acromine on. take random subset to avoid hammering'
+                        'the REST API',
+                        type=int,
+                        default=500)
+
+    results = parser.parse_args()
+
+    shortform = results.shortform
+    infile = results.infile
+    outfile = results.outfile
+    count = results.count
+
+    stmts = ac.load_statements(infile)
+    subset_stmts = sample(stmts, count)
+    
+    subset_df = get_stmts_df(subset_stmts, shortform)
+    subset_df.to_csv(outfile, sep=',', index=False)
